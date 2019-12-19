@@ -1682,8 +1682,7 @@ BOOL MethodDesc::RequiresInstMethodDescArg()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    return IsSharedByGenericInstantiations() &&
-        HasMethodInstantiation();
+    return IsSharedByGenericInstantiations() && HasMethodInstantiation();
 }
 
 //*******************************************************************************
@@ -1692,11 +1691,40 @@ BOOL MethodDesc::RequiresInstArg()
 {
     LIMITED_METHOD_DAC_CONTRACT;
 
-    BOOL fRet = IsSharedByGenericInstantiations() &&
-        (HasMethodInstantiation() || IsStatic() || GetMethodTable()->IsValueType() || (GetMethodTable()->IsInterface() && !IsAbstract()));
+    BOOL fRet = IsSharedByGenericInstantiations() && MethodShapeRequiresInstArgOnSharedGenericCode();
 
     _ASSERT(fRet == (RequiresInstMethodTableArg() || RequiresInstMethodDescArg()));
     return fRet;
+}
+
+BOOL MethodDesc::MethodShapeRequiresInstArgOnSharedGenericCode()
+{
+    LIMITED_METHOD_DAC_CONTRACT;
+
+    return HasMethodInstantiation() || (HasClassInstantiation() && (IsStatic() || GetMethodTable()->IsValueType() || (GetMethodTable()->IsInterface() && !IsAbstract())));
+}
+
+BOOL MethodDesc::RequiresConversionsForUniversalGenericCode()
+{
+    //CONTRACTL
+    //{
+    //    THROWS;
+    //    GC_TRIGGERS;
+    //}
+    //CONTRACTL_END
+
+    if (!HasClassOrMethodInstantiation())
+        return FALSE;
+
+    // TEMP
+    if (MethodShapeRequiresInstArgOnSharedGenericCode())
+        return TRUE;
+
+    //MethodDesc* pMD = LoadTypicalMethodDefinition();
+
+    // TODO: USG: Implement logic
+    return FALSE;
+    //return TRUE;
 }
 
 //*******************************************************************************

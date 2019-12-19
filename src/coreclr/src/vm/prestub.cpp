@@ -2247,6 +2247,7 @@ PCODE MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
                 MethodTable* pContextMT = pMethodFrame->GetThis()->GetMethodTable();
                 pContextMT = pContextMT->GetMethodTableMatchingParentClass(this->GetMethodTable());
                 pMethodForCallCounting = pContextMT->GetParallelMethodDesc(this);
+                pMethodForCallCounting = pContextMT->GetMethodDescForSlot(GetSlot());
             }
         }
     }
