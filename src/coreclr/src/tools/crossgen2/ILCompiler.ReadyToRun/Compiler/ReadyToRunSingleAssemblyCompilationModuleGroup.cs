@@ -179,6 +179,12 @@ namespace ILCompiler
 
         public override bool CanInline(MethodDesc callerMethod, MethodDesc calleeMethod)
         {
+            if (calleeMethod.IsCanonicalMethod(CanonicalFormKind.Universal))
+            {
+                // Future USG: support inlining.
+                return false;
+            }
+
             // Allow inlining if the caller is within the current version bubble
             // (because otherwise we may not be able to encode its tokens)
             // and if the callee is either in the same version bubble or is marked as non-versionable.

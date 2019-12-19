@@ -339,6 +339,8 @@ enum ReadyToRunHelper
 
     // Stack probing helper
     READYTORUN_HELPER_StackProbe                = 0x111,
+
+    READYTORUN_HELPER_ConventionConverter       = 0x113,
 };
 
 //

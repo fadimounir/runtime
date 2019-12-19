@@ -5586,6 +5586,8 @@ void CEEInfo::getCallInfo(
 
     pResult->hMethod = CORINFO_METHOD_HANDLE(pTargetMD);
 
+    pResult->callConverterKind = 0;     // Not supported in crossgen. Only in the crossgen compiler
+
     pResult->accessAllowed = CORINFO_ACCESS_ALLOWED;
     if ((flags & CORINFO_CALLINFO_SECURITYCHECKS) &&
         !((MethodDesc *)callerHandle)->IsILStub()) // IL stubs can access everything, don't bother doing access checks

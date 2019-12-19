@@ -181,6 +181,11 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
 
         public void EmitTypeSignature(TypeDesc typeDesc, SignatureContext context)
         {
+            if (typeDesc.IsCanonicalDefinitionType(CanonicalFormKind.Universal))
+            {
+                throw new NotSupportedException("Emitting universal canonical signatures");
+            }
+
             if (typeDesc is RuntimeDeterminedType runtimeDeterminedType)
             {
                 switch (runtimeDeterminedType.RuntimeDeterminedDetailsType.Kind)

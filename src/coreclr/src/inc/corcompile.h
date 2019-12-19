@@ -691,6 +691,8 @@ enum CORCOMPILE_FIXUP_BLOB_KIND
     ENCODE_INDIRECT_PINVOKE_TARGET,                 /* For calling a pinvoke method ptr indirectly */
     ENCODE_PINVOKE_TARGET,                          /* For calling a pinvoke method ptr */
 
+    ENCODE_LOAD_CONVERTER_THUNK,                    /* For converting to and from universal generics convention */
+
     ENCODE_MODULE_HANDLE                = 0x50,     /* Module token */
     ENCODE_STATIC_FIELD_ADDRESS,                    /* For accessing a static field */
     ENCODE_MODULE_ID_FOR_STATICS,                   /* For accessing static fields */
@@ -703,6 +705,23 @@ enum CORCOMPILE_FIXUP_BLOB_KIND
     ENCODE_VARARGS_SIG,
     ENCODE_ACTIVE_DEPENDENCY,                       /* Conditional active dependency */
     ENCODE_METHOD_NATIVE_ENTRY,                     /* NativeCallable method token */
+};
+
+enum CORCOMPILE_CONVERTER_KIND
+{
+    CONVERT_INVALID = 0,
+    // CONVERT_StandardToStandardInstantiating,
+    // CONVERT_StandardToGenericInstantiating,
+    // CONVERT_StandardToGenericInstantiatingIfNotHasThis,
+    CONVERT_STANDARD_TO_GENERIC,
+    // CONVERT_StandardToGenericPassthruInstantiating,
+    // CONVERT_StandardToGenericPassthruInstantiatingIfNotHasThis,
+    CONVERT_GENERIC_TO_STANDARD,
+    // CONVERT_StandardUnboxing,
+    // CONVERT_StandardUnboxingAndInstantiatingGeneric,
+    // CONVERT_GenericToStandardWithTargetPointerArg,
+    // CONVERT_GenericToStandardWithTargetPointerArgAndParamArg,
+    // CONVERT_GenericToStandardWithTargetPointerArgAndMaybeParamArg,
 };
 
 enum EncodeMethodSigFlags

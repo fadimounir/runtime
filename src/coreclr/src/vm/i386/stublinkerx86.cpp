@@ -3101,7 +3101,7 @@ VOID StubLinkerCPU::EmitUnboxMethodStub(MethodDesc* pUnboxMD)
 #else
     if (pUnboxMD->RequiresInstMethodTableArg())
     {
-        EmitInstantiatingMethodStub(pUnboxMD, NULL);
+        EmitInstantiatingMethodStub(pUnboxMD, NULL, NULL);
         return;
     }
 #endif
@@ -3171,7 +3171,7 @@ VOID StubLinkerCPU::EmitComputedInstantiatingMethodStub(MethodDesc* pSharedMD, s
         X86EmitAddReg(THIS_kREG, sizeof(void*));
     }
 
-    EmitTailJumpToMethod(pSharedMD);
+    EmitTailJumpToMethod(pSharedMD, NULL);
 }
 #endif // defined(FEATURE_SHARE_GENERIC_CODE) && defined(_TARGET_AMD64_)
 
@@ -3191,14 +3191,18 @@ VOID StubLinkerCPU::EmitLoadMethodAddressIntoAX(MethodDesc *pMD)
 }
 #endif
 
-VOID StubLinkerCPU::EmitTailJumpToMethod(MethodDesc *pMD)
+VOID StubLinkerCPU::EmitTailJumpToMethod(MethodDesc *pMD, PCODE pTargetUSGCode)
 {
 #ifdef _TARGET_AMD64_
     EmitLoadMethodAddressIntoAX(pMD);
     Emit16(X86_INSTR_JMP_EAX);
 #else
     // Use direct call if possible
-    if (pMD->HasStableEntryPoint())
+    if (pTargetUSGCode != NULL)
+    {
+        X86EmitRegLoad(kRAX, pTargetUSGCode);// MOV RAX, DWORD
+    }
+    else if (pMD->HasStableEntryPoint())
     {
         X86EmitNearJump(NewExternalCodeLabel((LPVOID) pMD->GetStableEntryPoint()));
     }
@@ -3221,17 +3225,22 @@ VOID StubLinkerCPU::EmitTailJumpToMethod(MethodDesc *pMD)
 // or * A MethodDesc for a static method in a generic class whose code is shared across instantiations.
 //      In this case, the extra argument is the MethodTable pointer of the instantiated type.
 // or * A MethodDesc for unboxing stub. In this case, the extra argument is null.
-VOID StubLinkerCPU::EmitInstantiatingMethodStub(MethodDesc* pMD, void* extra)
+VOID StubLinkerCPU::EmitInstantiatingMethodStub(MethodDesc* pMD, void* extra, PCODE pTargetUSGCode)
 {
     CONTRACTL
     {
         STANDARD_VM_CHECK;
-        PRECONDITION(pMD->RequiresInstArg());
+        PRECONDITION((pMD->RequiresInstArg() && pTargetUSGCode == NULL) ||
+                     (pMD->MethodShapeRequiresInstArgOnSharedGenericCode() && pTargetUSGCode != NULL));
+        PRECONDITION(pTargetUSGCode == NULL || pMD->GetModule()->GetReadyToRunInfo()->IsUniversalCanonicalEntryPoint(pTargetUSGCode));
     }
     CONTRACTL_END;
 
     MetaSig msig(pMD);
     ArgIterator argit(&msig);
+
+    if (pTargetUSGCode != NULL)
+        msig.SetHasParamTypeArg();
 
     int paramTypeArgOffset = argit.GetParamTypeArgOffset();
 
@@ -3277,9 +3286,31 @@ VOID StubLinkerCPU::EmitInstantiatingMethodStub(MethodDesc* pMD, void* extra)
         X86EmitAddReg(THIS_kREG, sizeof(void*));
     }
 
-    EmitTailJumpToMethod(pMD);
+    EmitTailJumpToMethod(pMD, pTargetUSGCode);
 }
 #endif // defined(FEATURE_SHARE_GENERIC_CODE) && !defined(FEATURE_INSTANTIATINGSTUB_AS_IL) && defined(_TARGET_X86_)
+
+#if defined(FEATURE_SHARE_GENERIC_CODE) && !defined(FEATURE_STUBS_AS_IL)
+VOID StubLinkerCPU::EmitCallConverterThunk(UINT_PTR pData)
+{
+    CONTRACTL
+    {
+        STANDARD_VM_CHECK;
+        PRECONDITION(pData != NULL);
+    }
+    CONTRACTL_END;
+
+#ifdef _TARGET_AMD64_
+
+    X86EmitRegLoad(kR10, pData);
+
+    //EmitLabelRef(GetEEFuncEntryPoint(CallConverterStub), reinterpret_cast<X64NearJumpExecute&>(gX64NearJumpExecute), 0);
+
+    X86EmitRegLoad(kRAX, GetEEFuncEntryPoint(CallConverterStub));   // MOV RAX, DWORD
+    Emit16(X86_INSTR_JMP_EAX);
+#endif
+}
+#endif
 
 
 #if defined(_DEBUG) && defined(STUBLINKER_GENERATES_UNWIND_INFO)

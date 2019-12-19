@@ -15,19 +15,19 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
 {
     public class MethodFixupSignature : Signature
     {
-        private readonly ReadyToRunFixupKind _fixupKind;
+        protected readonly ReadyToRunFixupKind _fixupKind;
 
-        private readonly MethodWithToken _method;
+        protected readonly MethodWithToken _method;
 
-        private readonly SignatureContext _signatureContext;
+        protected readonly SignatureContext _signatureContext;
 
-        private readonly bool _isUnboxingStub;
+        protected readonly bool _isUnboxingStub;
 
-        private readonly bool _isInstantiatingStub;
+        protected readonly bool _isInstantiatingStub;
 
         public MethodFixupSignature(
-            ReadyToRunFixupKind fixupKind, 
-            MethodWithToken method, 
+            ReadyToRunFixupKind fixupKind,
+            MethodWithToken method,
             SignatureContext signatureContext,
             bool isUnboxingStub,
             bool isInstantiatingStub)
@@ -98,8 +98,11 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
                 }
             }
 
-            SignatureContext innerContext = dataBuilder.EmitFixup(r2rFactory, fixupKind, method.Token.Module, _signatureContext);
+            // Emit typicaly definitions instead of universal canonical ones to avoid having to have type __UniversalCanon in the runtime
+            if (method.Method.IsCanonicalMethod(CanonicalFormKind.Universal))
+                method = new MethodWithToken(_method.Method.GetTypicalMethodDefinition(), _signatureContext.GetModuleTokenForMethod(method.Method), _method.ConstrainedType);
 
+            SignatureContext innerContext = dataBuilder.EmitFixup(r2rFactory, _fixupKind, method.Token.Module, _signatureContext);
             if (optimized && method.Token.TokenType == CorTokenType.mdtMethodDef)
             {
                 dataBuilder.EmitMethodDefToken(method.Token);
@@ -116,7 +119,7 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             return dataBuilder.ToObjectData();
         }
 
-        public override void AppendMangledName(NameMangler nameMangler, Utf8StringBuilder sb)
+        protected void AppendMethodSignatureMangledName(NameMangler nameMangler, Utf8StringBuilder sb)
         {
             sb.Append(nameMangler.CompilationUnitPrefix);
             sb.Append($@"MethodFixupSignature(");
@@ -131,6 +134,12 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             }
             sb.Append(": ");
             _method.AppendMangledName(nameMangler, sb);
+        }
+
+        public override void AppendMangledName(NameMangler nameMangler, Utf8StringBuilder sb)
+        {
+            sb.Append(nameMangler.CompilationUnitPrefix);
+            AppendMethodSignatureMangledName(nameMangler, sb);
         }
 
         public override int CompareToImpl(ISortableNode other, CompilerComparer comparer)

@@ -785,7 +785,8 @@ Module *ZapSig::DecodeModuleFromIndexIfLoaded(Module *fromModule,
 TypeHandle ZapSig::DecodeType(Module *pEncodeModuleContext,
                               Module *pInfoModule,
                               PCCOR_SIGNATURE pBuffer,
-                              ClassLoadLevel level)
+                              ClassLoadLevel level,
+                              SigTypeContext* pContext)
 {
     CONTRACTL
     {
@@ -800,10 +801,10 @@ TypeHandle ZapSig::DecodeType(Module *pEncodeModuleContext,
     ZapSig::Context    zapSigContext(pInfoModule, pEncodeModuleContext);
     ZapSig::Context *  pZapSigContext = &zapSigContext;
 
-    SigTypeContext typeContext;    // empty context is OK: encoding should not contain type variables.
+    SigTypeContext typeContext;    // empty context is OK if no one is provided: encoding should not contain type variables.
 
     TypeHandle th = p.GetTypeHandleThrowing(pInfoModule,
-                                            &typeContext,
+                                            (pContext == NULL ? &typeContext : pContext),
                                             ClassLoader::LoadTypes,
                                             level,
                                             level < CLASS_LOADED, // For non-full loads, drop a level when loading generic arguments

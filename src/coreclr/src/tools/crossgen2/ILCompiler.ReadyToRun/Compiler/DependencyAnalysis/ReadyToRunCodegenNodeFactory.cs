@@ -266,13 +266,25 @@ namespace ILCompiler.DependencyAnalysis
 
             _methodSignatures = new NodeCache<MethodFixupKey, MethodFixupSignature>(key =>
             {
-                return new MethodFixupSignature(
-                    key.FixupKind,
-                    key.TypeAndMethod.Method,
-                    key.TypeAndMethod.SignatureContext,
-                    key.TypeAndMethod.IsUnboxingStub,
-                    key.TypeAndMethod.IsInstantiatingStub
-                );
+                if (key.ConverterKind == ReadyToRunConverterKind.Invalid)
+                {
+                    return new MethodFixupSignature(
+                        key.FixupKind,
+                        key.TypeAndMethod.Method,
+                        key.TypeAndMethod.SignatureContext,
+                        key.TypeAndMethod.IsUnboxingStub,
+                        key.TypeAndMethod.IsInstantiatingStub);
+                }
+                else
+                {
+                    return new CallConverterFixupSignature(
+                        key.FixupKind,
+                        key.TypeAndMethod.Method,
+                        key.TypeAndMethod.SignatureContext,
+                        key.TypeAndMethod.IsUnboxingStub,
+                        key.TypeAndMethod.IsInstantiatingStub,
+                        key.ConverterKind);
+                }
             });
 
             _typeSignatures = new NodeCache<TypeFixupKey, TypeFixupSignature>(key =>
@@ -490,16 +502,18 @@ namespace ILCompiler.DependencyAnalysis
         {
             public readonly ReadyToRunFixupKind FixupKind;
             public readonly TypeAndMethod TypeAndMethod;
+            public readonly ReadyToRunConverterKind ConverterKind;
 
-            public MethodFixupKey(ReadyToRunFixupKind fixupKind, TypeAndMethod typeAndMethod)
+            public MethodFixupKey(ReadyToRunFixupKind fixupKind, TypeAndMethod typeAndMethod, ReadyToRunConverterKind converterKind)
             {
                 FixupKind = fixupKind;
                 TypeAndMethod = typeAndMethod;
+                ConverterKind = converterKind;
             }
 
             public bool Equals(MethodFixupKey other)
             {
-                return FixupKind == other.FixupKind && TypeAndMethod.Equals(other.TypeAndMethod);
+                return FixupKind == other.FixupKind && ConverterKind == other.ConverterKind && TypeAndMethod.Equals(other.TypeAndMethod);
             }
 
             public override bool Equals(object obj)
@@ -509,7 +523,9 @@ namespace ILCompiler.DependencyAnalysis
 
             public override int GetHashCode()
             {
-                return FixupKind.GetHashCode() ^ TypeAndMethod.GetHashCode();
+                return FixupKind.GetHashCode()
+                    ^ (31 * ConverterKind.GetHashCode())
+                    ^ (23 * TypeAndMethod.GetHashCode());
             }
         }
 
@@ -520,10 +536,11 @@ namespace ILCompiler.DependencyAnalysis
             MethodWithToken method,
             bool isUnboxingStub,
             bool isInstantiatingStub,
-            SignatureContext signatureContext)
+            SignatureContext signatureContext,
+            ReadyToRunConverterKind wrappingCallConverterKind = ReadyToRunConverterKind.Invalid)
         {
             TypeAndMethod key = new TypeAndMethod(method.ConstrainedType, method, isUnboxingStub, isInstantiatingStub, false, signatureContext);
-            return _methodSignatures.GetOrAdd(new MethodFixupKey(fixupKind, key));
+            return _methodSignatures.GetOrAdd(new MethodFixupKey(fixupKind, key, wrappingCallConverterKind));
         }
 
         private struct TypeFixupKey : IEquatable<TypeFixupKey>

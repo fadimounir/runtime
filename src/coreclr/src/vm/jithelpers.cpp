@@ -4023,6 +4023,35 @@ NOINLINE HCIMPL3(CORINFO_MethodPtr, JIT_VirtualFunctionPointer_Framed, Object * 
 }
 HCIMPLEND
 
+/*********************************************************************/
+CORINFO_MethodPtr JIT_CreateCallingConventionConverterThunk(PCODE pTargetEntrypoint, 
+                                                            CORINFO_METHOD_HANDLE methodHnd, 
+                                                            CORCOMPILE_CONVERTER_KIND converterKind)
+{
+    CONTRACTL{
+       THROWS;
+       GC_TRIGGERS;
+    } CONTRACTL_END;
+
+    CORINFO_MethodPtr addr = (CORINFO_MethodPtr)pTargetEntrypoint;
+
+#if defined(FEATURE_SHARE_GENERIC_CODE) 
+    ConverterThunkData* pData = new ConverterThunkData();
+    pData->Code = pTargetEntrypoint;
+    pData->Kind = converterKind;
+    pData->Method = (MethodDesc*)methodHnd;
+
+    MAKE_CURRENT_THREAD_AVAILABLE();
+
+    GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
+
+    Stub* pConverterStub = MakeCallConverterThunkStub(pData);
+    addr = (CORINFO_MethodPtr)pConverterStub->GetEntryPoint();
+#endif
+
+    return addr;
+}
+
 HCIMPL1(Object*, JIT_GetRuntimeFieldStub, CORINFO_FIELD_HANDLE field)
 {
     FCALL_CONTRACT;

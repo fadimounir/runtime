@@ -1957,7 +1957,17 @@ HRESULT CodeVersionManager::PublishNativeCodeVersion(MethodDesc* pMethod, Native
             }
             else
             {
-                pMethod->SetCodeEntryPoint(pCode);
+                bool fIsUniversalGenericCode = pMethod->GetModule()->IsReadyToRun() && pMethod->GetModule()->GetReadyToRunInfo()->IsUniversalCanonicalEntryPoint(pCode);
+
+                // We cannot set raw universal canonical entry points here if they could require a calling convention conversion
+                if (!fIsUniversalGenericCode || !pMethod->RequiresConversionsForUniversalGenericCode())
+                {
+                    pMethod->SetCodeEntryPoint(pCode);
+                }
+                else
+                {
+                    pMethod->ResetCodeEntryPoint();
+                }
             }
         }
         EX_CATCH_HRESULT(hr);
@@ -2200,7 +2210,10 @@ bool CodeVersionManager::IsMethodSupported(PTR_MethodDesc pMethodDesc)
         !pMethodDesc->GetLoaderAllocator()->IsCollectible() &&
 
         // EnC has its own way of versioning
-        !pMethodDesc->IsEnCMethod();
+        !pMethodDesc->IsEnCMethod() &&
+
+        // Universal generics are not versionable (represented by typical method definitions)
+        (!pMethodDesc->HasClassOrMethodInstantiation() || !pMethodDesc->IsTypicalMethodDefinition());
 }
 
 //---------------------------------------------------------------------------------------

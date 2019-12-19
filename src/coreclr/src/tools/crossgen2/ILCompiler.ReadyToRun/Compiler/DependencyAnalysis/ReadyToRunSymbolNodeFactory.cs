@@ -91,7 +91,7 @@ namespace ILCompiler.DependencyAnalysis
                     useInstantiatingStub: false,
                     _codegenNodeFactory.MethodSignature(ReadyToRunFixupKind.VirtualEntry,
                         cellKey.Method,
-                        cellKey.IsUnboxingStub, isInstantiatingStub: false, cellKey.SignatureContext),
+                        cellKey.IsUnboxingStub, isInstantiatingStub: false, cellKey.SignatureContext, cellKey.ConverterKind),
                     cellKey.SignatureContext,
                     cellKey.CallSite);
             });
@@ -482,9 +482,9 @@ namespace ILCompiler.DependencyAnalysis
 
         private NodeCache<MethodAndCallSite, ISymbolNode> _interfaceDispatchCells = new NodeCache<MethodAndCallSite, ISymbolNode>();
 
-        public ISymbolNode InterfaceDispatchCell(MethodWithToken method, SignatureContext signatureContext, bool isUnboxingStub, string callSite)
+        public ISymbolNode InterfaceDispatchCell(MethodWithToken method, SignatureContext signatureContext, bool isUnboxingStub, string callSite, ReadyToRunConverterKind converterKind)
         {
-            MethodAndCallSite cellKey = new MethodAndCallSite(method, isUnboxingStub, callSite, signatureContext);
+            MethodAndCallSite cellKey = new MethodAndCallSite(method, isUnboxingStub, callSite, signatureContext, converterKind);
             return _interfaceDispatchCells.GetOrAdd(cellKey);
         }
 
@@ -508,18 +508,21 @@ namespace ILCompiler.DependencyAnalysis
             public readonly bool IsUnboxingStub;
             public readonly string CallSite;
             public readonly SignatureContext SignatureContext;
+            public readonly ReadyToRunConverterKind ConverterKind;
 
-            public MethodAndCallSite(MethodWithToken method, bool isUnboxingStub, string callSite, SignatureContext signatureContext)
+            public MethodAndCallSite(MethodWithToken method, bool isUnboxingStub, string callSite, SignatureContext signatureContext, ReadyToRunConverterKind converterKind)
             {
                 CallSite = callSite;
                 IsUnboxingStub = isUnboxingStub;
                 Method = method;
                 SignatureContext = signatureContext;
+                ConverterKind = converterKind;
             }
 
             public bool Equals(MethodAndCallSite other)
             {
-                return CallSite == other.CallSite 
+                return CallSite == other.CallSite
+                    && ConverterKind == other.ConverterKind
                     && Method.Equals(other.Method) 
                     && IsUnboxingStub == other.IsUnboxingStub
                     && SignatureContext.Equals(other.SignatureContext);
@@ -535,6 +538,7 @@ namespace ILCompiler.DependencyAnalysis
                 return (CallSite != null ? CallSite.GetHashCode() : 0) 
                     ^ unchecked(31 * Method.GetHashCode())
                     ^ (IsUnboxingStub ? -0x80000000 : 0)
+                    ^ (19 * ConverterKind.GetHashCode())
                     ^ (23 * SignatureContext.GetHashCode());
             }
         }

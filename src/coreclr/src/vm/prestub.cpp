@@ -391,6 +391,13 @@ PCODE MethodDesc::PrepareILBasedCode(PrepareCodeConfig* pConfig)
         if (pCode == NULL)
             pCode = GetPrecompiledCode(pConfig);
 
+#ifdef FEATURE_READYTORUN // && USG
+        // Call from a universal canonical code to a universal canonical callee that doesn't have R2R code.
+        // We can't JIT compile this method. Return null, and the caller should handle this case
+        if (pCode == NULL && IsTypicalMethodDefinition() && RequiresConversionsForUniversalGenericCode())
+            return NULL;
+#endif // FEATURE_READYTORUN
+
 #ifdef FEATURE_PERFMAP
         if (pCode != NULL)
             PerfMap::LogPreCompiledMethod(this, pCode);
@@ -437,18 +444,25 @@ PCODE MethodDesc::GetPrecompiledCode(PrepareCodeConfig* pConfig)
         {
             LOG_USING_R2R_CODE(this);
 
-            if (pConfig->SetNativeCode(pCode, &pCode))
+            bool fIsUniversalCanonicalCode = GetModule()->IsReadyToRun() && GetModule()->GetReadyToRunInfo()->IsUniversalCanonicalEntryPoint(pCode);
+
+            if (!fIsUniversalCanonicalCode || !RequiresConversionsForUniversalGenericCode())
             {
-            #ifdef FEATURE_CODE_VERSIONING
-                pConfig->SetGeneratedOrLoadedNewCode();
-            #endif
-            #ifdef FEATURE_TIERED_COMPILATION
-                if (pConfig->GetMethodDesc()->IsEligibleForTieredCompilation())
+                // Do not set the method's entry point to this universal canonical entry point if it requires
+                // calling convention conversion.
+                if (pConfig->SetNativeCode(pCode, &pCode))
                 {
-                    _ASSERTE(pConfig->GetCodeVersion().GetOptimizationTier() == NativeCodeVersion::OptimizationTier0);
-                    pConfig->SetShouldCountCalls();
+#ifdef FEATURE_CODE_VERSIONING
+                    pConfig->SetGeneratedOrLoadedNewCode();
+#endif
+#ifdef FEATURE_TIERED_COMPILATION
+                    if (pConfig->GetMethodDesc()->IsEligibleForTieredCompilation())
+                    {
+                        _ASSERTE(pConfig->GetCodeVersion().GetOptimizationTier() == NativeCodeVersion::OptimizationTier0);
+                        pConfig->SetShouldCountCalls();
+                    }
+#endif
                 }
-            #endif
             }
         }
     }
@@ -1172,6 +1186,13 @@ BOOL PrepareCodeConfig::SetNativeCode(PCODE pCode, PCODE * ppAlternateCodeToUse)
 {
     LIMITED_METHOD_CONTRACT;
 
+    bool fIsUniversalCanonicalCode = m_pMethodDesc->GetModule()->IsReadyToRun() &&
+        m_pMethodDesc->GetModule()->GetReadyToRunInfo()->IsUniversalCanonicalEntryPoint(pCode);
+
+    // We should never set raw canonical entrypoints if they could require a calling convention conversion
+
+    _ASSERTE(!fIsUniversalCanonicalCode || !m_pMethodDesc->RequiresConversionsForUniversalGenericCode());
+
     if (m_pMethodDesc->SetNativeCodeInterlocked(pCode, NULL))
     {
         return TRUE;
@@ -1688,6 +1709,71 @@ Stub * MakeUnboxingStubWorker(MethodDesc *pMD)
 }
 
 #if defined(FEATURE_SHARE_GENERIC_CODE)
+Stub* MakeCallConverterThunkStub(ConverterThunkData* pData)
+{
+    CONTRACT(Stub*)
+    {
+        THROWS;
+        GC_TRIGGERS;
+        PRECONDITION(pData != NULL && pData->Kind != CONVERT_INVALID);
+        PRECONDITION(pData->Method != NULL && pData->Method->HasClassOrMethodInstantiation());
+        POSTCONDITION(CheckPointer(RETVAL));
+    }
+    CONTRACT_END;
+
+    // TODO: USG: put in hashtable to avoid creating multiple identical stubs with the same data
+
+    CPUSTUBLINKER sl;
+    sl.EmitCallConverterThunk((UINT_PTR)pData);
+    Stub* pstub = sl.Link(pData->Method->GetLoaderAllocator()->GetStubHeap());
+
+    char* debugConverterName = (char*)"UNKNOWN!!";
+    switch (pData->Kind)
+    {
+    case CONVERT_STANDARD_TO_GENERIC: debugConverterName = (char*)"STANDARD_TO_GENERIC"; break;
+    case CONVERT_GENERIC_TO_STANDARD: debugConverterName = (char*)"GENERIC_TO_STANDARD"; break;
+    }
+
+    printf("\033[1;36m >> MakeCallConverterThunkStub %s (%d) = %#zx for %#zx (%s::%s)\n\033[0m", 
+        debugConverterName,
+        pData->Kind, 
+        pstub->GetEntryPoint(), 
+        pData->Code, 
+        pData->Method->m_pszDebugClassName, 
+        pData->Method->m_pszDebugMethodName);
+
+    RETURN pstub;
+}
+
+Stub* MakeInstantiatingStubForUniversalGenericTarget(MethodDesc* pMD, PCODE pTargetCode)
+{
+    CONTRACT(Stub*)
+    {
+        THROWS;
+        GC_TRIGGERS;
+        PRECONDITION(!pMD->IsInstantiatingStub());
+        PRECONDITION(!pMD->RequiresInstArg() && pMD->MethodShapeRequiresInstArgOnSharedGenericCode());
+        PRECONDITION(!pMD->IsSharedByGenericMethodInstantiations());
+        PRECONDITION(pTargetCode != NULL || pMD->GetModule()->GetReadyToRunInfo()->IsUniversalCanonicalEntryPoint(pTargetCode));
+        POSTCONDITION(CheckPointer(RETVAL));
+    }
+    CONTRACT_END;
+
+    void* extraArg = (pMD->HasMethodInstantiation() ? (void*)pMD : (void*)pMD->GetMethodTable());
+
+    CPUSTUBLINKER sl;
+    sl.EmitInstantiatingMethodStub(pMD, extraArg, pTargetCode);
+    Stub* pstub = sl.Link(pMD->GetLoaderAllocator()->GetStubHeap());
+
+    printf("\033[1;36m >> MakeInstantiatingStubForUniversalGenericTarget = %#zx for %#zx (%s::%s)\n\033[0m",
+        pstub->GetEntryPoint(),
+        pTargetCode,
+        pMD->m_pszDebugClassName,
+        pMD->m_pszDebugMethodName);
+
+    RETURN pstub;
+}
+
 Stub * MakeInstantiatingStubWorker(MethodDesc *pMD)
 {
     CONTRACT(Stub*)
@@ -1742,7 +1828,7 @@ Stub * MakeInstantiatingStubWorker(MethodDesc *pMD)
 #else
         CPUSTUBLINKER sl;
         _ASSERTE(pSharedMD != NULL && pSharedMD != pMD);
-        sl.EmitInstantiatingMethodStub(pSharedMD, extraArg);
+        sl.EmitInstantiatingMethodStub(pSharedMD, extraArg, NULL);
 
         pstub = sl.Link(pMD->GetLoaderAllocator()->GetStubHeap());
 #endif
@@ -1807,6 +1893,15 @@ extern "C" PCODE STDCALL PreStubWorker(TransitionBlock * pTransitionBlock, Metho
 
     // Make sure the method table is restored, and method instantiation if present
     pMD->CheckRestore();
+
+    if (strcmp(pMD->GetModule()->GetSimpleName(), "console") == 0)
+    {
+        printf("\033[0;31m  PRESTUB  %s%s%s::%s\n\033[0m",
+            (pMD->IsUnboxingStub() ? "[UNBOX] " : ""),
+            (pMD->IsInstantiatingStub() ? "[INST] " : ""),
+            pMD->m_pszDebugClassName,
+            pMD->m_pszDebugMethodName);
+    }
 
     CONSISTENCY_CHECK(GetAppDomain()->CheckCanExecuteManagedCode(pMD));
 
@@ -1882,6 +1977,75 @@ extern "C" PCODE STDCALL PreStubWorker(TransitionBlock * pTransitionBlock, Metho
     return pbRetVal;
 }
 
+PCODE HandleUniversalCanonicalEntryPoint(PCODE pCode, MethodDesc* pPrestubMethod, MethodDesc* pNonUniversalCanonicalMethod, PCODE* ppResultCode, Stub** ppResultStub)
+{
+    CONTRACT(PCODE)
+    {
+        STANDARD_VM_CHECK;
+        PRECONDITION(pCode != NULL && pPrestubMethod != NULL && pNonUniversalCanonicalMethod != NULL);
+        PRECONDITION(pPrestubMethod->HasSameMethodDefAs(pNonUniversalCanonicalMethod));
+        PRECONDITION(pNonUniversalCanonicalMethod->HasClassOrMethodInstantiation() && !pNonUniversalCanonicalMethod->IsTypicalMethodDefinition());
+        PRECONDITION(ppResultCode != NULL && ppResultStub != NULL);
+        POSTCONDITION(RETVAL != NULL);
+    }
+    CONTRACT_END;
+
+    Module* pModule = pPrestubMethod->GetModule();
+    bool fIsUSGPrestubMethod = pPrestubMethod->HasClassOrMethodInstantiation() && pPrestubMethod->IsTypicalMethodDefinition();
+    bool fIsUSGEntryPoint = pModule->IsReadyToRun() && pModule->GetReadyToRunInfo()->IsUniversalCanonicalEntryPoint(pCode);
+
+    if (fIsUSGPrestubMethod)
+    {
+        if (!fIsUSGEntryPoint && pPrestubMethod->RequiresConversionsForUniversalGenericCode())
+        {
+            // pCode is a jitted method, or non-USG readytorun code, so we need to convert
+            // to the standard convention first
+            ConverterThunkData* pData = new ConverterThunkData();
+            pData->Code = pCode;
+            pData->Kind = CONVERT_GENERIC_TO_STANDARD;
+            pData->Method = pNonUniversalCanonicalMethod;
+
+            *ppResultStub = MakeCallConverterThunkStub(pData);
+            *ppResultCode = NULL;
+            RETURN(*ppResultStub)->GetEntryPoint();
+        }
+    }
+    else
+    {
+        bool fNeedToInsertInstantiationArgument = pPrestubMethod->MethodShapeRequiresInstArgOnSharedGenericCode() && !pPrestubMethod->RequiresInstArg();
+
+        if (fIsUSGEntryPoint && (fNeedToInsertInstantiationArgument || pPrestubMethod->RequiresConversionsForUniversalGenericCode()))
+        {
+            // These two methods should be the same here
+            _ASSERTE(pPrestubMethod == pNonUniversalCanonicalMethod);
+
+            // TODO: USG: CONVERT_STANDARD_TO_GENERIC_INSTANTIATING and delete MakeInstantiatingStubForUniversalGenericTarget
+            if (fNeedToInsertInstantiationArgument)
+            {
+                // To use USG, we need to use an instantiating stub. If the input method does not require an instantiating stub,
+                // this means it does not share generic code, but since we're going to use a USG codegen, we need to insert a generic
+                // context argument in the call.
+                _ASSERT(!pPrestubMethod->IsSharedByGenericInstantiations());
+                pCode = MakeInstantiatingStubForUniversalGenericTarget(pPrestubMethod, pCode)->GetEntryPoint();
+            }
+
+            ConverterThunkData* pData = new ConverterThunkData();
+            pData->Code = pCode;
+            pData->Kind = CONVERT_STANDARD_TO_GENERIC;
+            pData->Method = pNonUniversalCanonicalMethod;
+
+            *ppResultStub = MakeCallConverterThunkStub(pData);
+            *ppResultCode = NULL;
+            RETURN(*ppResultStub)->GetEntryPoint();
+        }
+    }
+
+    // No conversion needed if we reach here
+    *ppResultCode = pCode;
+    *ppResultStub = NULL;
+    RETURN pCode;
+}
+
 #ifdef _DEBUG
 //
 // These are two functions for testing purposes only, in debug builds only. They can be used by setting
@@ -1947,7 +2111,13 @@ PCODE MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
     // Running a prestub on a method causes us to access its MethodTable
     g_IBCLogger.LogMethodDescAccess(this);
 
-    if (ContainsGenericVariables())
+    // We're using typical definitions to represent universal canonical methods when running the prestub.
+    bool fIsUniversalCanonicalMethod = HasClassOrMethodInstantiation() && IsTypicalMethodDefinition();
+    // This assert could be wrong, but keep it for now to catch unexpected scenarios, and investigate 
+    // if things look correct for those scenarios
+    _ASSERTE(!fIsUniversalCanonicalMethod || (IsIL() || IsNoMetadata() || IsFCall()));
+
+    if (ContainsGenericVariables() && !fIsUniversalCanonicalMethod)
     {
         COMPlusThrow(kInvalidOperationException, IDS_EE_CODEEXECUTION_CONTAINSGENERICVAR);
     }
@@ -2027,13 +2197,70 @@ PCODE MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
         pThread->HandleThreadAbort();
     }
 
+    if (strcmp(GetModule()->GetSimpleName(), "console") == 0 && HasClassOrMethodInstantiation())
+    {
+        int a = 0; a++;
+
+        if (MethodShapeRequiresInstArgOnSharedGenericCode())
+        {
+            int b = 0; b++;
+        }
+    }
+
+    MethodDesc* pMethodForCallCounting = this;
+    if (fIsUniversalCanonicalMethod)
+    {
+        MAKE_CURRENT_THREAD_AVAILABLE();
+        Frame* pCurFrame = CURRENT_THREAD->GetFrame();
+
+        if (pCurFrame->GetVTablePtr() == PrestubMethodFrame::GetMethodFrameVPtr() ||
+            pCurFrame->GetVTablePtr() == DynamicHelperFrame::GetMethodFrameVPtr())
+        {
+            GCX_COOP_THREAD_EXISTS(CURRENT_THREAD);
+
+            FramedMethodFrame* pMethodFrame = (FramedMethodFrame*)pCurFrame;
+            if (MethodShapeRequiresInstArgOnSharedGenericCode())
+            {
+                // TODO: USG: account for return buffer for forced byref. Need to update API implementation on TransitionFrame
+                if (HasMethodInstantiation())
+                {
+                    //pMethodForCallCounting = (MethodDesc*)pMethodFrame->GetParamTypeArg();
+                    pMethodForCallCounting = IsStatic() ?
+                        (MethodDesc*)pMethodFrame->GetArgumentRegisters()->RCX :
+                        (MethodDesc*)pMethodFrame->GetArgumentRegisters()->RCX;
+                }
+                else
+                {
+                    //MethodTable* pContextMT = (MethodTable*)pMethodFrame->GetParamTypeArg();
+                    MethodTable* pContextMT = IsStatic() ?
+                        (MethodTable*)pMethodFrame->GetArgumentRegisters()->RCX :
+                        (MethodTable*)pMethodFrame->GetArgumentRegisters()->RDX;
+
+                    // TODO: USG: Need to call GetMethodTableMatchingParentClass? Assert for now...
+                    _ASSERTE(pContextMT->HasSameTypeDefAs(this->GetMethodTable()));
+                    pMethodForCallCounting = pContextMT->GetParallelMethodDesc(this);
+                }
+            }
+            else
+            {
+                _ASSERTE(!HasMethodInstantiation());
+                MethodTable* pContextMT = pMethodFrame->GetThis()->GetMethodTable();
+                pContextMT = pContextMT->GetMethodTableMatchingParentClass(this->GetMethodTable());
+                pMethodForCallCounting = pContextMT->GetParallelMethodDesc(this);
+            }
+        }
+    }
+
+    _ASSERTE(!fIsUniversalCanonicalMethod || (
+        pMethodForCallCounting->HasClassOrMethodInstantiation() && !pMethodForCallCounting->IsTypicalMethodDefinition()));
+
     /**************************   BACKPATCHING   *************************/
 #ifdef FEATURE_CODE_VERSIONING
-    if (IsVersionable())
+    if (IsVersionable() && !fIsUniversalCanonicalMethod)
     {
         bool doBackpatch = true;
         bool doFullBackpatch = false;
-        pCode = GetCodeVersionManager()->PublishVersionableCodeIfNecessary(this, &doBackpatch, &doFullBackpatch);
+        pCode = GetCodeVersionManager()->PublishVersionableCodeIfNecessary(pMethodForCallCounting, &doBackpatch, &doFullBackpatch);
 
         if (doBackpatch)
         {
@@ -2046,7 +2273,7 @@ PCODE MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
     }
 #endif
 
-    if (!IsPointingToPrestub())
+    if (!IsPointingToPrestub() && !fIsUniversalCanonicalMethod)
     {
         LOG((LF_CLASSLOADER, LL_INFO10000,
             "    In PreStubWorker, method already jitted, backpatching call point\n"));
@@ -2075,7 +2302,16 @@ PCODE MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
             GetOrCreatePrecode();
         }
         pCode = PrepareInitialCode();
-    } // end else if (IsIL() || IsNoMetadata())
+
+        if (pCode == NULL && fIsUniversalCanonicalMethod)
+        {
+            // This can only happen when a universal canonical caller calls a universal canonical callee that doesn't have
+            // precompiled R2R code. In this case, we need to get the instantiated MethodDesc, and call PrepareInitialCode
+            // on that one. We might also need to wrap the entry point with a generic to standard call converter stub.
+            _ASSERT(pMethodForCallCounting != NULL && pMethodForCallCounting->HasClassOrMethodInstantiation() && !pMethodForCallCounting->IsTypicalMethodDefinition());
+            pCode = pMethodForCallCounting->PrepareInitialCode();
+        }
+    }
     else if (IsNDirect())
     {
         if (GetModule()->IsReadyToRun() && GetModule()->GetReadyToRunInfo()->HasNonShareablePInvokeStubs() && MayUsePrecompiledILStub())
@@ -2126,6 +2362,11 @@ PCODE MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
     /**************************   POSTJIT *************************/
     _ASSERTE(pCode == NULL || GetNativeCode() == NULL || pCode == GetNativeCode());
 
+    if (pCode != NULL && HasClassOrMethodInstantiation())
+    {
+        HandleUniversalCanonicalEntryPoint(pCode, this, pMethodForCallCounting, &pCode, &pStub);
+    }
+
     // At this point we must have either a pointer to managed code or to a stub. All of the above code
     // should have thrown an exception if it couldn't make a stub.
     _ASSERTE((pStub != NULL) ^ (pCode != NULL));
@@ -2165,6 +2406,15 @@ PCODE MethodDesc::DoPrestub(MethodTable *pDispatchingMT)
 
     _ASSERTE(!IsPointingToPrestub());
     _ASSERTE(HasStableEntryPoint());
+
+    if (fIsUniversalCanonicalMethod)
+    {
+        // TODO: USG: DoBackpatch doesn't expect typical instantiations. Need to figure out what to do here.
+        if (pCode != NULL)
+            RETURN pCode;
+        else
+            RETURN pStub->GetEntryPoint();
+    }
 
     RETURN DoBackpatch(pMT, pDispatchingMT, FALSE);
 }
@@ -2298,6 +2548,26 @@ static PCODE PatchNonVirtualExternalMethod(MethodDesc * pMD, PCODE pCode, PTR_CO
     return pCode;
 }
 
+#ifdef FEATURE_READYTORUN
+TADDR GetFirstArgumentRegisterValuePtr(TransitionBlock* pTransitionBlock)
+{
+    TADDR pArgument = (TADDR)pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters();
+#ifdef _TARGET_X86_
+    // x86 is special as always
+    pArgument += offsetof(ArgumentRegisters, ECX);
+#endif
+
+    return pArgument;
+}
+
+TADDR GetThirdArgumentRegisterValue(TransitionBlock* pTransitionBlock)
+{
+    // TODO: USG: Other architectures
+    TADDR pArgumentRegisters = (TADDR)pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters();
+    return ((ArgumentRegisters*)pArgumentRegisters)->R8;
+}
+#endif
+
 //==========================================================================================
 // In NGen images calls to external methods start out pointing to jump thunks.
 // These jump thunks initially point to the assembly code _ExternalMethodFixupStub
@@ -2424,6 +2694,22 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
             kind &= ~ENCODE_MODULE_OVERRIDE;
         }
 
+        CORCOMPILE_CONVERTER_KIND converterKind = CONVERT_INVALID;
+
+        SigTypeContext instantiatedTypeContext;
+#ifdef FEATURE_READYTORUN
+        if (kind == ENCODE_LOAD_CONVERTER_THUNK)
+        {
+            converterKind = (CORCOMPILE_CONVERTER_KIND)(*pBlob++);
+            kind = *pBlob++;
+
+            // TODO: USG: getting context from other than thisPtr
+            TADDR pArgument = GetFirstArgumentRegisterValuePtr(pTransitionBlock);
+            MethodTable* pContextMT = (*(Object**)pArgument)->GetMethodTable();
+            instantiatedTypeContext = SigTypeContext(pContextMT->GetInstantiation(), Instantiation());
+        }
+#endif
+
         TypeHandle th;
         switch (kind)
         {
@@ -2487,7 +2773,7 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
 
         case ENCODE_VIRTUAL_ENTRY:
             {
-                pMD = ZapSig::DecodeMethod(pModule, pInfoModule, pBlob, &th);
+                pMD = ZapSig::DecodeMethod(pModule, pInfoModule, pBlob, &instantiatedTypeContext, &th);
 
         VirtualEntry:
                 pMD->PrepareForUseAsADependencyOfANativeImage();
@@ -2511,7 +2797,7 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
         case ENCODE_VIRTUAL_ENTRY_DEF_TOKEN:
             {
                 mdToken MethodDef = TokenFromRid(CorSigUncompressData(pBlob), mdtMethodDef);
-                pMD = MemberLoader::GetMethodDescFromMethodDef(pInfoModule, MethodDef, FALSE);
+                pMD = MemberLoader::GetMethodDescFromMethodDef(pInfoModule, MethodDef, instantiatedTypeContext.m_classInst, instantiatedTypeContext.m_methodInst, FALSE);
 
                 goto VirtualEntry;
             }
@@ -2522,8 +2808,7 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
 
                 FieldDesc * pFD = NULL;
 
-                SigTypeContext typeContext;
-                MemberLoader::GetDescFromMemberRef(pInfoModule, MemberRef, &pMD, &pFD, &typeContext, FALSE /* strict metadata checks */, &th, TRUE /* actual type required */);
+                MemberLoader::GetDescFromMemberRef(pInfoModule, MemberRef, &pMD, &pFD, &instantiatedTypeContext, FALSE /* strict metadata checks */, &th, TRUE /* actual type required */);
                 _ASSERTE(pMD != NULL);
 
                 goto VirtualEntry;
@@ -2532,7 +2817,7 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
         case ENCODE_VIRTUAL_ENTRY_SLOT:
             {
                 slot = CorSigUncompressData(pBlob);
-                pMT =  ZapSig::DecodeType(pModule, pInfoModule, pBlob).GetMethodTable();
+                pMT = ZapSig::DecodeType(pModule, pInfoModule, pBlob, CLASS_LOADED, &instantiatedTypeContext).GetMethodTable();
 
                 fVirtual = true;
                 break;
@@ -2604,6 +2889,24 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
                 pCode = PatchNonVirtualExternalMethod(pMD, pCode, pImportSection, pIndirection);
             }
         }
+
+#ifdef FEATURE_READYTORUN
+        if (converterKind != CONVERT_INVALID)
+        {
+            // TODO: USG: cases where pMD is null (ENCODE_VIRTUAL_ENTRY_SLOT)
+            _ASSERTE(fVirtual && pMD != NULL && pMD->IsVtableMethod());
+
+            GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
+
+            ConverterThunkData* pData = new ConverterThunkData();
+            pData->Code = pCode;
+            pData->Kind = converterKind;
+            pData->Method = pMD;
+
+            pCode = MakeCallConverterThunkStub(pData)->GetEntryPoint();
+            *(TADDR*)pIndirection = pCode;
+        }
+#endif
 
 #if defined (FEATURE_JIT_PITCHING)
         DeleteFromPitchingCandidate(pMD);
@@ -2848,17 +3151,6 @@ static PCODE getHelperForStaticBase(Module * pModule, CORCOMPILE_FIXUP_BLOB_KIND
     return pHelper;
 }
 
-TADDR GetFirstArgumentRegisterValuePtr(TransitionBlock * pTransitionBlock)
-{
-    TADDR pArgument = (TADDR)pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters();
-#ifdef _TARGET_X86_
-    // x86 is special as always
-    pArgument += offsetof(ArgumentRegisters, ECX);
-#endif
-
-    return pArgument;
-}
-
 void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock,
                                     Module *                    pModule,
                                     Module *                    pInfoModule,
@@ -2967,6 +3259,7 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
     *pDictionaryIndexAndSlot = (pContextMT == NULL ? 0 : pContextMT->GetNumDicts() - 1);
     *pDictionaryIndexAndSlot <<= 16;
 
+#if 0
     WORD dictionarySlot;
 
     if (kind == ENCODE_DICTIONARY_LOOKUP_METHOD)
@@ -3009,6 +3302,10 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
             *pDictionaryIndexAndSlot |= dictionarySlot;
         }
     }
+#else
+    // TODO: USG: Support for dictionary layout access for non-shareable code
+    pResult->signature = (BYTE*)pBlobStart;
+#endif
 }
 
 PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD sectionIndex, Module * pModule, CORCOMPILE_FIXUP_BLOB_KIND * pKind, TypeHandle * pTH, MethodDesc ** ppMD, FieldDesc ** ppFD)
@@ -3186,8 +3483,8 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
             // case ENCODE_VIRTUAL_ENTRY_REF_TOKEN:
             // case ENCODE_VIRTUAL_ENTRY_SLOT:
                 {
-                   if (!pMD->IsVtableMethod())
-                   {
+                    if (!pMD->IsVtableMethod())
+                    {
                         pHelper = DynamicHelpers::CreateReturnConst(pModule->GetLoaderAllocator(), pMD->GetMultiCallableAddrOfCode());
                     }
                     else
@@ -3295,13 +3592,22 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
                     ctorData.pArg3 = NULL;
                 }
 
+                PCODE pTargetPtr = pMD->GetMultiCallableAddrOfCode();
+
+                if (pMD->HasClassOrMethodInstantiation() && pMD->IsTypicalMethodDefinition())
+                {
+                    // We should only use a function pointer in the universal generics case, where the function pointer is
+                    // the result of a generic dictionary lookup
+                    pTargetPtr = GetThirdArgumentRegisterValue(pTransitionBlock);
+                }
+
                 if (ctorData.pArg3 != NULL)
                 {
-                    pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pMD->GetMultiCallableAddrOfCode(), (TADDR)ctorData.pArg3, target);
+                    pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pTargetPtr, (TADDR)ctorData.pArg3, target);
                 }
                 else
                 {
-                    pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pMD->GetMultiCallableAddrOfCode(), target);
+                    pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pTargetPtr, target);
                 }
             }
             break;
@@ -3459,6 +3765,540 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
     if (pHelper == NULL)
         *(SIZE_T *)((TADDR)pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters()) = result;
     return pHelper;
+}
+
+// TODO: USG: refactor to separate .h/.cpp file
+class CallConversionParameters
+{
+private:
+    ArgIterator* m_callerArgs;
+    ArgIterator* m_calleeArgs;
+    LPBYTE m_pCallerTransitionBlock;
+    LPBYTE m_pCalleeTransitionBlock;
+
+
+public:
+    CallConversionParameters(ArgIterator* pCallerArgs, ArgIterator* pCalleeArgs, LPBYTE pCallerTransitionBlock, LPBYTE pCalleeTransitionBlock)
+    {
+        m_callerArgs = pCallerArgs;
+        m_calleeArgs = pCalleeArgs;
+        m_pCallerTransitionBlock = pCallerTransitionBlock;
+        m_pCalleeTransitionBlock = pCalleeTransitionBlock;
+    }
+
+    TADDR GetThisPointer()
+    {
+        if (m_callerArgs->HasThis() != m_calleeArgs->HasThis())
+            // TODO: USG: failfast
+            COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+
+        if (m_calleeArgs->HasThis())
+        {
+            return *((TADDR*)(m_pCallerTransitionBlock + m_callerArgs->GetThisOffset()));
+        }
+        return NULL;
+    }
+
+    TADDR GetCallerReturnBuffer()
+    {
+        // If the return buffer is treated the same way for both calling conventions
+        if (m_callerArgs->HasRetBuffArg() == m_calleeArgs->HasRetBuffArg())
+        {
+            // Do nothing, or copy the ret buf arg around
+            if (m_callerArgs->HasRetBuffArg())
+            {
+                return *((TADDR*)(m_pCallerTransitionBlock + m_callerArgs->GetRetBuffArgOffset()));
+            }
+        }
+        else
+        {
+            // We'll need to create a return buffer, or assign into the return buffer when the actual call completes.
+            if (m_calleeArgs->HasRetBuffArg())
+            {
+                // TODO: USG: Fix allocation hack and GC protect
+                TypeHandle thRetType;
+                bool forceByRefUnused;
+                void* callerRetBuffer = nullptr;
+
+                CorElementType returnType = m_callerArgs->GetReturnType(&thRetType, &forceByRefUnused);
+                UINT returnSize = MetaSig::GetElemSize(returnType, thRetType);
+                returnSize = (UINT)ALIGN_UP(returnSize, sizeof(LPVOID));
+
+                // Make sure buffer is nulled out
+                callerRetBuffer = malloc(returnSize);
+                _ASSERTE(callerRetBuffer != nullptr);
+                memset(callerRetBuffer, 0, returnSize);
+
+                return (TADDR)callerRetBuffer;
+            }
+        }
+
+        return NULL;
+    }
+
+    TADDR GetVarArgSigCookie()
+    {
+        if (m_calleeArgs->IsVarArg() != m_callerArgs->IsVarArg())
+        {
+            // TODO: USG: failfast
+            COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+        }
+        if (m_calleeArgs->IsVarArg())
+        {
+            return *((TADDR*)(m_pCallerTransitionBlock + m_callerArgs->GetVASigCookieOffset()));
+        }
+
+        return NULL;
+    }
+
+    TADDR GetInstantiatingStubArgument()
+    {
+        if (m_calleeArgs->HasParamType() == m_callerArgs->HasParamType())
+        {
+            if (m_calleeArgs->HasParamType())
+            {
+                return *((TADDR*)(m_pCallerTransitionBlock + m_callerArgs->GetParamTypeArgOffset()));
+            }
+        }
+        else if (m_calleeArgs->HasParamType())
+        {
+            // TODO: USG: compute instantiation pointer and return it
+            return (TADDR)0x12345678;
+            //_ASSERTE(_instantiatingStubArgument != nullptr);
+            //return _instantiatingStubArgument;
+        }
+        else
+        {
+            // TODO: USG: assert case of USG->normal convertion where target is non-shareable MD, or failfast
+        }
+        return NULL;
+    }
+
+    //
+    // Converting by-ref values to non-by-ref form requires the converter to be capable of taking a pointer to a small integer
+    // value anywhere in memory and then copying the referenced value into an ABI-compliant pointer-sized "slot" which
+    // faithfully communicates the value.  In such cases, the argument slot prepared by the converter must conform to all
+    // sign/zero-extension rules mandated by the ABI.
+    //
+    // ARM32 requires all less-than-pointer-sized values to be sign/zero-extended when they are placed into pointer-sized
+    // slots (i.e., requires "producer-oriented" sign/zero-extension).  x86/amd64 do not have this requirement (i.e., the
+    // unused high bytes of the pointer-sized slot are ignored by the consumer and are allowed to take on any value); however
+    // to reduce the need for ever more #ifs in this file, this behavior will not be #if'd away. (Its not wrong, its just unnecessary)
+    //
+    static void ExtendingCopy(void* pSrcVoid, void* pDestVoid, CorElementType type, int typeSize)
+    {
+        byte* pSrc = (byte*)pSrcVoid;
+        byte* pDest = (byte*)pDestVoid;
+
+        if (SignExtendType(type))
+            SignExtend(pSrc, pDest, typeSize);
+        else if (ZeroExtendType(type))
+            ZeroExtend(pSrc, pDest, typeSize);
+        else
+            CopyMemory(pDest, pSrc, typeSize);
+    }
+
+    static bool SignExtendType(CorElementType type)
+    {
+        switch (type)
+        {
+        case ELEMENT_TYPE_I1:
+        case ELEMENT_TYPE_I2:
+#ifdef BIT64
+        case ELEMENT_TYPE_I4:
+#endif
+            return true;
+
+        }
+
+        return false;
+    }
+
+    static bool ZeroExtendType(CorElementType type)
+    {
+        switch (type)
+        {
+        case ELEMENT_TYPE_U1:
+        case ELEMENT_TYPE_BOOLEAN:
+        case ELEMENT_TYPE_CHAR:
+        case ELEMENT_TYPE_U2:
+#ifdef BIT64
+        case ELEMENT_TYPE_U4:
+#endif
+            return true;
+
+        }
+
+        return false;
+    }
+
+    static void SignExtend(void* pSrcVoid, void* pDestVoid, int size)
+    {
+        byte* pSrc = (byte*)pSrcVoid;
+        byte* pDest = (byte*)pDestVoid;
+
+        switch (size)
+        {
+        case 1:
+            *((TADDR*)pDest) = (TADDR)(*(signed char*)pSrc);
+            break;
+
+        case 2:
+            *((TADDR*)pDest) = (TADDR)(*(short*)pSrc);
+            break;
+
+#if BIT64
+            // On 64 bit platforms, a 32 bit parameter may require truncation/extension
+        case 4:
+            *((TADDR*)pDest) = (TADDR)(*(int*)pSrc);
+            break;
+#endif
+        default:
+            _ASSERTE(!"Should only be called for sizes where sign extension is a meaningful concept");
+            break;
+        }
+    }
+
+    static void ZeroExtend(void* pSrcVoid, void* pDestVoid, int size)
+    {
+        byte* pSrc = (byte*)pSrcVoid;
+        byte* pDest = (byte*)pDestVoid;
+
+        switch (size)
+        {
+        case 1:
+            *((TADDR*)pDest) = (TADDR)(*(uint8_t*)pSrc);
+            break;
+
+        case 2:
+            *((TADDR*)pDest) = (TADDR)(*(uint16_t*)pSrc);
+            break;
+
+#if BIT64
+            // On 64 bit platforms, a 32 bit parameter may require truncation/extension
+        case 4:
+            *((TADDR*)pDest) = (TADDR)(*(uint32_t*)pSrc);
+            break;
+#endif
+        default:
+            _ASSERTE(!"Should only be called for sizes where sign extension is a meaningful concept");
+            break;
+        }
+    }
+};
+
+#define CCCONVERTER_TRACE
+
+EXTERN_C PCODE STDCALL CallConverterWorker(TransitionBlock* pTransitionBlock, ConverterThunkData* pData)
+{
+    _ASSERTE(pData->Code != NULL);
+    _ASSERTE(pData->Method != NULL && !pData->Method->IsTypicalMethodDefinition());
+    _ASSERTE(pData->Kind != CONVERT_INVALID);
+
+    LPBYTE pCallerTransitionBlock = NULL;
+    LPBYTE pCalleeTransitionBlock = NULL;
+    unsigned fpReturnSize = 0;
+    CallDescrData callDescrData;
+
+    MAKE_CURRENT_THREAD_AVAILABLE();
+
+    FrameWithCookie<DynamicHelperFrame> frame(pTransitionBlock, 0);
+    DynamicHelperFrame* pFrame = &frame;
+
+    pFrame->Push(CURRENT_THREAD);
+
+    INSTALL_MANAGED_EXCEPTION_DISPATCHER;
+    INSTALL_UNWIND_AND_CONTINUE_HANDLER;
+
+    //
+    // the incoming argument array is not gc-protected, so we 
+    // may not trigger a GC before we actually call managed code
+    //
+    //GCX_FORBID();
+
+    {
+        MetaSig callerSig(pData->Method);
+        MetaSig calleeSig(pData->Method);
+
+        ArgIterator callerArgs(&callerSig);
+        ArgIterator calleeArgs(&calleeSig);
+
+        UINT numFixedArgsIncludingReturnType = callerSig.NumFixedArgs() + (UINT)1;
+        bool* pFocedByRefParams = new bool[numFixedArgsIncludingReturnType];
+        for (UINT i = 0; i < numFixedArgsIncludingReturnType; i++)
+            pFocedByRefParams[i] = true;
+
+        char* debugConverterName = (char*)"UNKNOWN!!";
+
+        switch (pData->Kind)
+        {
+        case CONVERT_STANDARD_TO_GENERIC:
+            debugConverterName = (char*)"STANDARD_TO_GENERIC";
+            calleeSig.SetHasParamTypeArg();
+            calleeArgs = ArgIterator(&calleeSig, pFocedByRefParams, calleeSig.NumFixedArgs() + 1);
+            break;
+
+        case CONVERT_GENERIC_TO_STANDARD:
+            debugConverterName = (char*)"GENERIC_TO_STANDARD";
+            // TODO: USG Future: detect case where target == precode jump instruction, where target is normal->USG converter, and skip double conversion
+
+            callerSig.SetHasParamTypeArg();
+            callerArgs = ArgIterator(&callerSig, pFocedByRefParams, callerSig.NumFixedArgs() + 1);
+
+            break;
+        }
+
+        printf("\033[1;33m  ** Converter: %s: %s::%s -> %#zx\n\033[0m", debugConverterName, pData->Method->m_pszDebugClassName, pData->Method->m_pszDebugMethodName, pData->Code);
+
+        DWORD arg = 0;
+        UINT nStackBytes = calleeArgs.SizeOfFrameArgumentArray();
+
+        // Create a fake FramedMethodFrame on the stack.
+
+        // Note that SizeOfFrameArgumentArray does overflow checks with sufficient margin to prevent overflows here
+        DWORD dwAllocaSize = TransitionBlock::GetNegSpaceSize() + sizeof(TransitionBlock) + nStackBytes;
+        LPBYTE pAlloc = (LPBYTE)_alloca(dwAllocaSize);
+
+        pCallerTransitionBlock = (LPBYTE)pTransitionBlock;
+        pCalleeTransitionBlock = pAlloc + TransitionBlock::GetNegSpaceSize();
+
+        CallConversionParameters conversionParams = CallConversionParameters(&callerArgs, &calleeArgs, pCallerTransitionBlock, pCalleeTransitionBlock);
+
+#ifdef CALLDESCR_REGTYPEMAP
+        UINT64 dwRegTypeMap = 0;
+        BYTE* pMap = (BYTE*)&dwRegTypeMap;
+#endif
+
+        //Disabled for now
+#if 0
+        //
+        // Perform the conversion
+        //
+        {
+            //
+            // Setup some of the special parameters on the output transition block
+            //
+            TADDR thisPointer = conversionParams.GetThisPointer();
+            TADDR callerRetBuffer = conversionParams.GetCallerReturnBuffer();
+            TADDR VASigCookie = conversionParams.GetVarArgSigCookie();
+            TADDR instantiatingStubArgument = conversionParams.GetInstantiatingStubArgument();
+            {
+                _ASSERTE((thisPointer != NULL && calleeArgs.HasThis()) || (thisPointer == NULL && !calleeArgs.HasThis()));
+                if (thisPointer != NULL)
+                {
+                    *((TADDR*)(pCalleeTransitionBlock + calleeArgs.GetThisOffset())) = thisPointer;
+                }
+
+                _ASSERTE((callerRetBuffer != NULL && calleeArgs.HasRetBuffArg()) || (callerRetBuffer == NULL && !calleeArgs.HasRetBuffArg()));
+                if (callerRetBuffer != NULL)
+                {
+                    *((TADDR*)(pCalleeTransitionBlock + calleeArgs.GetRetBuffArgOffset())) = callerRetBuffer;
+                }
+
+                _ASSERTE((VASigCookie != NULL && calleeArgs.IsVarArg()) || (VASigCookie == NULL && !calleeArgs.IsVarArg()));
+                if (VASigCookie != NULL)
+                {
+                    *((TADDR*)(pCalleeTransitionBlock + calleeArgs.GetVASigCookieOffset())) = VASigCookie;
+                }
+
+                _ASSERTE((instantiatingStubArgument != NULL && calleeArgs.HasParamType()) || (instantiatingStubArgument == NULL && !calleeArgs.HasParamType()));
+                if (instantiatingStubArgument != NULL)
+                {
+                    *((TADDR*)(pCalleeTransitionBlock + calleeArgs.GetParamTypeArgOffset())) = instantiatingStubArgument;
+                }
+            }
+#ifdef CCCONVERTER_TRACE
+            if (thisPointer != NULL)                printf("    ThisPtr  = %#zx\n", thisPointer);
+            if (callerRetBuffer != NULL)            printf("    RetBuf   = %#zx\n", callerRetBuffer);
+            if (VASigCookie != NULL)                printf("    VASig    = %#zx\n", VASigCookie);
+            if (instantiatingStubArgument != NULL)  printf("    InstArg  = %#zx\n", instantiatingStubArgument);
+#endif
+
+            //
+            // Setup the rest of the parameters on the ouput transition block by copying them from the input transition block
+            //
+            int ofsCallee;
+            int ofsCaller;
+            TypeHandle thDummy;
+            TypeHandle thArgType;
+            TypeHandle thRetType;
+#ifdef CALLDESCR_FPARGREGS
+            FloatArgumentRegisters* pFloatArgumentRegisters = NULL;
+#endif
+            {
+                unsigned arg = 0;
+
+                while (true)
+                {
+                    // Setup argument offsets.
+                    ofsCallee = calleeArgs.GetNextOffset();
+                    ofsCaller = 0x7fffffff;
+
+                    // Check to see if we've handled all the arguments that we are to pass to the callee. 
+                    if (TransitionBlock::InvalidOffset == ofsCallee)
+                    {
+                        ofsCaller = callerArgs.GetNextOffset();
+
+                        if (TransitionBlock::InvalidOffset != ofsCaller)
+                            // TODO: USG: failfast
+                            COMPlusThrowHR(COR_E_BADIMAGEFORMAT);
+
+                        break;
+                    }
+
+#ifdef CALLDESCR_FPARGREGS
+                    // Under CALLDESCR_FPARGREGS -ve offsets indicate arguments in floating point registers. If we
+                    // have at least one such argument we point the call worker at the floating point area of the
+                    // frame (we leave it null otherwise since the worker can perform a useful optimization if it
+                    // knows no floating point registers need to be set up).
+                    if ((ofsCallee < 0) && (pFloatArgumentRegisters == NULL))
+                        pFloatArgumentRegisters = (FloatArgumentRegisters*)(pCalleeTransitionBlock + TransitionBlock::GetOffsetOfFloatArgumentRegisters());
+#endif
+
+                    byte* pDest = pCalleeTransitionBlock + ofsCallee;
+                    byte* pSrc = NULL;
+
+                    int stackSizeCallee = 0x7fffffff;
+                    int stackSizeCaller = 0x7fffffff;
+
+                    bool isCalleeArgPassedByRef = false;
+                    bool isCallerArgPassedByRef = false;
+
+                    //
+                    // Compute size and pointer to caller's arg
+                    //
+                    {
+                        ofsCaller = callerArgs.GetNextOffset();
+                        pSrc = pCallerTransitionBlock + ofsCaller;
+
+                        stackSizeCallee = calleeArgs.GetArgSize();
+                        stackSizeCaller = callerArgs.GetArgSize();
+
+                        isCalleeArgPassedByRef = calleeArgs.IsArgPassedByRef();
+                        isCallerArgPassedByRef = callerArgs.IsArgPassedByRef();
+                    }
+                    _ASSERTE(stackSizeCallee == stackSizeCaller);
+
+                    if (isCalleeArgPassedByRef == isCallerArgPassedByRef)
+                    {
+                        // Argument copies without adjusting calling convention.
+                        if (isCalleeArgPassedByRef)
+                        {
+                            *((TADDR*)pDest) = *(TADDR*)pSrc;
+                        }
+                        else
+                        {
+                            CorElementType argElemType = calleeArgs.GetArgType(&thArgType);
+                            CallConversionParameters::ExtendingCopy(pSrc, pDest, argElemType, stackSizeCaller);
+                        }
+                    }
+                    else
+                    {
+                        // Calling convention adjustment. Used to handle conversion from universal shared generic form to standard 
+                        // calling convention and vice versa
+                        if (isCalleeArgPassedByRef)
+                        {
+                            // Pass as the byref pointer a pointer to the position in the transition block of the input argument
+                            *((TADDR*)pDest) = (TADDR)pSrc;
+                        }
+                        else
+                        {
+                            // Copy into the destination the data pointed at by the pointer in the source(caller) data.
+                            byte* pRealSrc = *(byte**)pSrc;
+                            CorElementType argElemType = calleeArgs.GetArgType(&thArgType);
+                            CallConversionParameters::ExtendingCopy(pRealSrc, pDest, argElemType, stackSizeCaller);
+                        }
+                    }
+
+#ifdef CALLDESCR_REGTYPEMAP
+                    // enable later: FillInRegTypeMap(ofsCallee, calleeArgs.GetArgType(), pMap);
+                    // use this hack instead for now since we use the caller TB
+                    FillInRegTypeMap(ofsCaller, callerArgs.GetArgType(), pMap);
+#endif
+
+#ifdef CCCONVERTER_TRACE
+                    if (isCalleeArgPassedByRef)
+                        printf("    Arg%d byref = %#zx - StackSize = %d\n", arg, *(TADDR*)pDest, stackSizeCallee);
+                    else
+                        printf("    Arg%d       = %#zx - StackSize = %d\n", arg, *(TADDR*)pDest, stackSizeCallee);
+#endif
+
+                    arg++;
+                }
+            }
+
+            fpReturnSize = calleeArgs.GetFPReturnSize();
+        }
+#endif
+
+        delete[] pFocedByRefParams;
+
+        callDescrData.pSrc = pCallerTransitionBlock + sizeof(TransitionBlock);
+        callDescrData.numStackSlots = nStackBytes / STACK_ELEM_SIZE;
+#ifdef CALLDESCR_ARGREGS
+        callDescrData.pArgumentRegisters = (ArgumentRegisters*)(pCallerTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters());
+#endif
+#ifdef CALLDESCR_FPARGREGS
+        callDescrData.pFloatArgumentRegisters = pFloatArgumentRegisters;
+#endif
+#ifdef CALLDESCR_REGTYPEMAP
+        callDescrData.dwRegTypeMap = dwRegTypeMap;
+#endif
+        callDescrData.fpReturnSize = fpReturnSize;
+        callDescrData.pTarget = pData->Code;
+
+#ifdef CALLDESCR_RETBUFFARGREG
+        // TODO : USG
+        /*if (callerArgs.HasRetBuffArg() == calleeArgs.HasRetBuffArg())
+        {
+            // If there is a return buffer in use, the function doesn't really return anything in the normal
+            // return value registers, but CallDescrThunk will always copy a pointer sized chunk into the
+            // ret buf. Make that ok by giving it a valid location to stash bits.
+            callDescrData.pReturnBuffer = (void*)(pCallerTransitionBlock + callerArgs.GetRetBuffArgOffset());
+        }
+        else if (calleeArgs.HasRetBuffArg())
+        {
+            // This is the case when the caller doesn't have a return buffer argument, but the callee does.
+            // In that case the return value captured by CallDescrWorker is ignored.
+
+            // When CallDescrWorkerInternal is called, have it return values into a temporary unused buffer
+            // In actuality its returning its return information into the return value block already, but that return buffer
+            // was setup as a passed in argument instead of being filled in by the CallDescrWorker function directly.
+            callDescrData.pReturnBuffer = (void*)& returnBlockForIgnoredData;
+        }
+        else
+        {
+            // If there is no return buffer explictly in use by the callee, return to a buffer which is conservatively reported
+            // by the universal transition frame.
+
+            // This is the case where HasRetBuffArg is false for the callee, but the caller has a return buffer.
+            // In this case we need to capture the direct return value from callee into a buffer which may contain
+            // a gc reference (or not), and then once the call is complete, copy the value into the return buffer
+            // passed by the caller. (Do not directly use the return buffer provided by the caller, as CallDescrWorker
+            // does not properly use a write barrier, and the actual return buffer provided may be on the GC heap.)
+            callDescrData.pReturnBuffer = (void*)(pCallerTransitionBlock + TransitionBlock.GetOffsetOfReturnValuesBlock());
+        }
+
+        //callDescrData.pRetBuffArg = (UINT64*)(pCallerTransitionBlock + TransitionBlock::GetRetBuffArgOffset());*/
+#endif
+
+    } // End GCX_FORBID
+
+
+    UNINSTALL_UNWIND_AND_CONTINUE_HANDLER;
+    UNINSTALL_MANAGED_EXCEPTION_DISPATCHER;
+
+
+    //////////////////////////////////////////////////////////////
+    ////  Call the Callee
+    //////////////////////////////////////////////////////////////
+    CallDescrWorker(&callDescrData);
+
+
+    pFrame->Pop(CURRENT_THREAD);
+
+    // HACK with return value
+    return *callDescrData.returnValue;
 }
 
 #endif // FEATURE_READYTORUN

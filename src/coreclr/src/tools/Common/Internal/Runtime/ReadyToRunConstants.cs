@@ -114,6 +114,8 @@ namespace Internal.ReadyToRunConstants
         IndirectPInvokeTarget = 0x2E,       // Target (indirect) of an inlined pinvoke
         PInvokeTarget = 0x2F,               // Target of an inlined pinvoke
 
+        LoadConverterThunk = 0x30,          // For converting to and from universal generics convention
+
         ModuleOverride = 0x80,
         // followed by sig-encoded UInt with assemblyref index into either the assemblyref
         // table of the MSIL metadata of the master context module for the signature or
@@ -266,6 +268,8 @@ namespace Internal.ReadyToRunConstants
 
         StackProbe                  = 0x111,
 
+        ConventionConverter         = 0x113,
+
         // **********************************************************************************************
         //
         // These are not actually part of the R2R file format. We have them here because it's convenient.
@@ -312,5 +316,22 @@ namespace Internal.ReadyToRunConstants
     public static class ReadyToRunRuntimeConstants
     {
         public const int READYTORUN_PInvokeTransitionFrameSizeInPointerUnits = 11;
+    }
+
+    public enum ReadyToRunConverterKind
+    {
+        Invalid = 0,
+        // StandardToStandardInstantiating,
+        // StandardToGenericInstantiating,
+        // StandardToGenericInstantiatingIfNotHasThis,
+        StandardToGeneric,
+        // StandardToGenericPassthruInstantiating,
+        // StandardToGenericPassthruInstantiatingIfNotHasThis,
+        GenericToStandard,
+        // StandardUnboxing,
+        // StandardUnboxingAndInstantiatingGeneric,
+        // GenericToStandardWithTargetPointerArg,
+        // GenericToStandardWithTargetPointerArgAndParamArg,
+        // GenericToStandardWithTargetPointerArgAndMaybeParamArg,
     }
 }

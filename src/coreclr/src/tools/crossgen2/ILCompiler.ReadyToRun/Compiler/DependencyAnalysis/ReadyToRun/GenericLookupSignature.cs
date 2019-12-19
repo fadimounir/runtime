@@ -122,7 +122,15 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             SignatureContext innerContext = dataBuilder.EmitFixup(r2rFactory, fixupToEmit, targetModule, _signatureContext);
             if (contextTypeToEmit != null)
             {
-                dataBuilder.EmitTypeSignature(contextTypeToEmit, innerContext);
+                if (contextTypeToEmit.IsCanonicalSubtype(CanonicalFormKind.Universal))
+                {
+                    // Emit generic definitions instead of universal canonical ones to avoid having to have type __UniversalCanon in the runtime
+                    dataBuilder.EmitTypeSignature(contextTypeToEmit.GetTypeDefinition(), innerContext);
+                }
+                else
+                {
+                    dataBuilder.EmitTypeSignature(contextTypeToEmit, innerContext);
+                }
             }
 
             dataBuilder.EmitByte((byte)_fixupKind);

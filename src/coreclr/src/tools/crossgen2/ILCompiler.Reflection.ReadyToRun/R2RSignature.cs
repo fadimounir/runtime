@@ -1575,6 +1575,10 @@ namespace ILCompiler.Reflection.ReadyToRun
                     builder.Append("PERSONALITY_ROUTINE_FILTER_FUNCLET");
                     break;
 
+                case ReadyToRunHelper.ConventionConverter:
+                    builder.Append("CORINFO_HELP_CALL_CONVERTER_THUNK");
+                    break;
+
                 //
                 // Deprecated/legacy
                 //

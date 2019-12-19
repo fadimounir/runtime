@@ -59,6 +59,8 @@ public:
 
     MethodDesc * GetMethodDescForEntryPoint(PCODE entryPoint);
 
+    BOOL IsUniversalCanonicalEntryPoint(PCODE entryPoint);
+
     BOOL HasHashtableOfTypes();
     BOOL TryLookupTypeTokenFromName(const NameHandle *pName, mdToken * pFoundTypeToken);
 

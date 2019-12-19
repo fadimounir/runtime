@@ -737,15 +737,19 @@ class ArgIteratorBaseForMethodInvoke
 protected:
     SIGNATURENATIVEREF * m_ppNativeSig;
 
-    FORCEINLINE CorElementType GetReturnType(TypeHandle * pthValueType)
+    FORCEINLINE CorElementType GetReturnType(TypeHandle* pthValueType, bool* pForceByRefReturn)
     {
         WRAPPER_NO_CONTRACT;
+        if (pForceByRefReturn)
+            *pForceByRefReturn = false;
         return (*pthValueType = (*m_ppNativeSig)->GetReturnTypeHandle()).GetInternalCorElementType();
     }
 
-    FORCEINLINE CorElementType GetNextArgumentType(DWORD iArg, TypeHandle * pthValueType)
+    FORCEINLINE CorElementType GetNextArgumentType(DWORD iArg, TypeHandle* pthValueType, bool* pForceByRefReturn)
     {
         WRAPPER_NO_CONTRACT;
+        if (pForceByRefReturn)
+            *pForceByRefReturn = false;
         return (*pthValueType = (*m_ppNativeSig)->GetArgumentAt(iArg)).GetInternalCorElementType();
     }
 

@@ -49,6 +49,10 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
 
             foreach (MethodWithGCInfo method in r2rFactory.EnumerateCompiledMethods())
             {
+                // USG methods have only one possible instantiation, and are emitted to the MethodEntryPointTable
+                if (method.Method.IsCanonicalMethod(CanonicalFormKind.Universal))
+                    continue;
+
                 if (method.Method.HasInstantiation || method.Method.OwningType.HasInstantiation)
                 {
                     int methodIndex = r2rFactory.RuntimeFunctionsTable.GetIndex(method);

@@ -7,6 +7,7 @@ include AsmConstants.inc
 
     extern  ExternalMethodFixupWorker:proc
     extern  ProcessCLRException:proc
+    extern  CallConverterWorker:proc
 
 ifdef FEATURE_PREJIT
     extern  VirtualMethodFixupWorker:proc
@@ -35,6 +36,26 @@ PATCH_LABEL ExternalMethodFixupPatchLabel
         TAILJMP_RAX
 
 NESTED_END ExternalMethodFixupStub, _TEXT
+
+
+;============================================================================================
+;; EXTERN_C VOID __stdcall CallConverterStub()
+
+NESTED_ENTRY CallConverterStub, _TEXT
+
+        PROLOG_WITH_TRANSITION_BLOCK
+
+        lea             rcx, [rsp + __PWTB_TransitionBlock]     ; pTransitionBlock*
+        mov             rdx, r10                                ; pData
+        call            CallConverterWorker
+
+        EPILOG_WITH_TRANSITION_BLOCK_TAILCALL
+        
+        ret
+
+        ;; TODO. This will most likely be a jmp to a return-type handler stub, or just RET.
+
+NESTED_END CallConverterStub, _TEXT
 
 
 ifdef FEATURE_READYTORUN

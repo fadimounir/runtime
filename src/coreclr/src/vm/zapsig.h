@@ -160,7 +160,8 @@ public:
         Module              *referencingModule,
         Module              *fromModule,
         PCCOR_SIGNATURE     pBuffer,
-        ClassLoadLevel      level = CLASS_LOADED);
+        ClassLoadLevel      level = CLASS_LOADED, 
+        SigTypeContext*     pContext = NULL);
 
     static MethodDesc *DecodeMethod(
         Module              *referencingModule,

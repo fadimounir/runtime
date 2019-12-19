@@ -47,15 +47,24 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
             {
                 SignatureContext innerContext = builder.EmitFixup(r2rFactory, ReadyToRunFixupKind.DelegateCtor, _methodToken.Module, _signatureContext);
 
+                MethodDesc methodSignatureToEmit = _targetMethod.Method;
+                TypeDesc delegateTypeSignatureToEmit = _delegateType;
+
+                // Emit typicaly definitions instead of universal canonical ones to avoid having to have type __UniversalCanon in the runtime
+                if (methodSignatureToEmit.IsCanonicalMethod(CanonicalFormKind.Universal))
+                    methodSignatureToEmit = methodSignatureToEmit.GetTypicalMethodDefinition();
+                if (delegateTypeSignatureToEmit.IsCanonicalSubtype(CanonicalFormKind.Universal))
+                    delegateTypeSignatureToEmit = delegateTypeSignatureToEmit.GetTypeDefinition();
+
                 builder.EmitMethodSignature(
-                    new MethodWithToken(_targetMethod.Method, _methodToken, constrainedType: null),
+                    new MethodWithToken(methodSignatureToEmit, _methodToken, constrainedType: null),
                     enforceDefEncoding: false,
                     enforceOwningType: false,
                     innerContext,
                     isUnboxingStub: false,
                     isInstantiatingStub: _targetMethod.Method.HasInstantiation);
 
-                builder.EmitTypeSignature(_delegateType, innerContext);
+                builder.EmitTypeSignature(delegateTypeSignatureToEmit, innerContext);
             }
 
             return builder.ToObjectData();

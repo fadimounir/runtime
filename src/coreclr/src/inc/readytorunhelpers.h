@@ -122,5 +122,7 @@ HELPER(READYTORUN_HELPER_MonitorExit,               CORINFO_HELP_MON_EXIT,      
 HELPER(READYTORUN_HELPER_StackProbe,                CORINFO_HELP_STACK_PROBE,                       )
 #endif
 
+HELPER(READYTORUN_HELPER_ConventionConverter,       CORINFO_HELP_CALL_CONVERTER_THUNK,              )
+
 #undef HELPER
 #undef OPTIMIZEFORSPEED

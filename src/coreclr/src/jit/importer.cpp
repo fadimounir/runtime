@@ -5757,6 +5757,10 @@ GenTree* Compiler::impImportLdvirtftn(GenTree*                thisPtr,
         return nullptr;
     }
 
+    GenTree* exactMethodDescCopy;
+    exactMethodDesc = impCloneExpr(exactMethodDesc, &exactMethodDescCopy, NO_CLASS_HANDLE, (unsigned)CHECK_SPILL_ALL,
+                                   nullptr DEBUGARG("LDVIRTFTN method handle"));
+
     GenTreeCall::Use* helpArgs = gtNewCallArgs(exactMethodDesc);
 
     helpArgs = gtPrependNewCallArg(exactTypeDesc, helpArgs);
@@ -5765,7 +5769,19 @@ GenTree* Compiler::impImportLdvirtftn(GenTree*                thisPtr,
 
     // Call helper function.  This gets the target address of the final destination callsite.
 
-    return gtNewHelperCallNode(CORINFO_HELP_VIRTUAL_FUNC_PTR, TYP_I_IMPL, helpArgs);
+    GenTree* fptr = gtNewHelperCallNode(CORINFO_HELP_VIRTUAL_FUNC_PTR, TYP_I_IMPL, helpArgs);
+
+    // Call helper function to convert the calling convention if needed
+
+    if (opts.IsReadyToRun() && pCallInfo->callConverterKind != 0)
+    {
+        helpArgs = gtNewCallArgs(fptr, exactMethodDescCopy,
+                                new (this, GT_CNS_INT) GenTreeIntCon(TYP_UINT, pCallInfo->callConverterKind));
+
+        fptr = gtNewHelperCallNode(CORINFO_HELP_CALL_CONVERTER_THUNK, TYP_I_IMPL, helpArgs);
+    }
+
+    return fptr;
 }
 
 //------------------------------------------------------------------------
@@ -7864,6 +7880,63 @@ var_types Compiler::impImportCall(OPCODE                  opcode,
             /* It should have the GTF_CALL_NULLCHECK flag set. Reset it */
             assert(call->gtFlags & GTF_CALL_NULLCHECK);
             call->gtFlags &= ~GTF_CALL_NULLCHECK;
+        }
+
+        // Most likely this is a HACK for delegate invokes from USG... Doesn't work when the function
+        // takes parameters
+        if (callInfo->callConverterKind != 0)
+        {
+            GenTree* thisPtr = impStackTop().val;
+
+            GenTree* thisPtrCopy;
+            thisPtr = impCloneExpr(thisPtr, &thisPtrCopy, NO_CLASS_HANDLE, (unsigned)CHECK_SPILL_ALL,
+                                   nullptr DEBUGARG("LDVIRTFTN this pointer"));
+
+            // Get the delegate target
+
+            GenTree* delegateTarget = new (this, GT_LEA)
+                GenTreeAddrMode(TYP_REF, thisPtr, nullptr, 0, eeGetEEInfo()->offsetOfDelegateFirstTarget);
+
+            delegateTarget = gtNewOperNode(GT_IND, TYP_REF, delegateTarget);
+
+            // Extract the proper thisPtr for the delegate invoke
+
+            GenTree* newThisAddr = new (this, GT_LEA)
+                GenTreeAddrMode(TYP_BYREF, thisPtrCopy, nullptr, 0, eeGetEEInfo()->offsetOfDelegateInstance);
+
+            GenTree* newThis = gtNewOperNode(GT_IND, TYP_REF, newThisAddr);
+
+            // Load the method handle for the converter
+
+            GenTree* delegateInvokeMethodDesc = impTokenToHandle(pResolvedToken);
+
+            // Invoke the converter helper
+
+            GenTreeArgList* helpArgs =
+                gtNewArgList(delegateTarget, delegateInvokeMethodDesc,
+                             new (this, GT_CNS_INT) GenTreeIntCon(TYP_UINT, callInfo->callConverterKind));
+
+            GenTree* fptr = gtNewHelperCallNode(CORINFO_HELP_CALL_CONVERTER_THUNK, TYP_I_IMPL, helpArgs);
+
+            unsigned lclNum2 = lvaGrabTemp(true DEBUGARG("Delegate invoke through call converter"));
+            impAssignTempGen(lclNum2, fptr, (unsigned)CHECK_SPILL_ALL);
+            fptr = gtNewLclvNode(lclNum2, TYP_I_IMPL);
+
+            // Replace delegate thisPtr with target thisPtr on stack
+            impPopStack();
+            impPushOnStack(newThis, typeInfo());
+
+            ((GenTreeCall*)call)->gtCallType    = CT_INDIRECT;
+            ((GenTreeCall*)call)->gtCallMethHnd = (CORINFO_METHOD_HANDLE)fptr;
+            ((GenTreeCall*)call)->gtCallArgs    = args;
+
+            if (args)
+            {
+                call->gtFlags |= (args->gtFlags & GTF_ALL_EFFECT);
+            }
+
+            // Remove delegate flag
+            call->gtCall.gtCallMoreFlags &= ~GTF_CALL_M_DELEGATE_INV;
         }
     }
 

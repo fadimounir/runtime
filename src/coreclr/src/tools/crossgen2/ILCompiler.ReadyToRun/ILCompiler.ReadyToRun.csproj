@@ -97,6 +97,7 @@
     <Compile Include="..\..\Common\Compiler\NameMangler.cs" Link="Compiler\NameMangler.cs" />
     <Compile Include="..\..\Common\Compiler\SingleMethodRootProvider.cs" Link="Compiler\SingleMethodRootProvider.cs" />
     <Compile Include="..\..\Common\Compiler\TypeExtensions.cs" Link="Compiler\TypeExtensions.cs" />
+    <Compile Include="..\..\Common\Compiler\UniversalCanonLayoutAlgorithm.cs" Link="Compiler\UniversalCanonLayoutAlgorithm.cs" />
     <Compile Include="..\..\Common\Compiler\VectorFieldLayoutAlgorithm.cs" Link="Compiler\VectorFieldLayoutAlgorithm.cs" />
     <Compile Include="..\..\Common\Compiler\Logger.cs" Link="Compiler\Logger.cs" />
     <Compile Include="..\..\Common\JitInterface\CorInfoTypes.VarInfo.cs" Link="JitInterface\CorInfoTypes.VarInfo.cs" />
@@ -106,6 +107,7 @@
     <Compile Include="Compiler\CompilationModuleGroup.ReadyToRun.cs" />
     <Compile Include="Compiler\DependencyAnalysis\ReadyToRun\ArgIterator.cs" />
     <Compile Include="Compiler\DependencyAnalysis\ReadyToRun\AttributePresenceFilterNode.cs" />
+    <Compile Include="Compiler\DependencyAnalysis\ReadyToRun\CallConverterFixupSignature.cs" />
     <Compile Include="Compiler\DependencyAnalysis\ReadyToRun\CopiedFieldRvaNode.cs" />
     <Compile Include="Compiler\DependencyAnalysis\ReadyToRun\CopiedManagedResourcesNode.cs" />
     <Compile Include="Compiler\DependencyAnalysis\ReadyToRun\CopiedMetadataBlobNode.cs" />

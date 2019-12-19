@@ -611,6 +611,10 @@ namespace Internal.JitInterface
                     id = ReadyToRunHelper.StackProbe;
                     break;
 
+                case CorInfoHelpFunc.CORINFO_HELP_CALL_CONVERTER_THUNK:
+                    id = ReadyToRunHelper.ConventionConverter;
+                    break;
+
                 case CorInfoHelpFunc.CORINFO_HELP_INITCLASS:
                 case CorInfoHelpFunc.CORINFO_HELP_INITINSTCLASS:
                 case CorInfoHelpFunc.CORINFO_HELP_THROW_ARGUMENTEXCEPTION:
@@ -1092,6 +1096,8 @@ namespace Internal.JitInterface
             if ((flags & CORINFO_CALLINFO_FLAGS.CORINFO_CALLINFO_LDFTN) != 0)
             {
                 directCall = true;
+                if (targetMethod.IsCanonicalMethod(CanonicalFormKind.Universal))
+                    forceUseRuntimeLookup = true;
             }
             else
             if (targetMethod.Signature.IsStatic)
@@ -1283,6 +1289,8 @@ namespace Internal.JitInterface
 
             pResult->hMethod = ObjectToHandle(methodToCall);
 
+            pResult->callConverterKind = 0;
+
             // TODO: access checks
             pResult->accessAllowed = CorInfoIsAccessAllowedResult.CORINFO_ACCESS_ALLOWED;
 
@@ -1462,12 +1470,25 @@ namespace Internal.JitInterface
                             return;
                         }
 
+                        ReadyToRunConverterKind converterKindNeeded = ReadyToRunConverterKind.Invalid;
+
+                        if (MethodBeingCompiled.IsCanonicalMethod(CanonicalFormKind.Universal) && targetMethod.IsCanonicalMethod(CanonicalFormKind.Universal))
+                        {
+                            // This is a callvirt callsite in a universal generic method, where the target can either end up in USG or non-USG code. Given that
+                            // we don't know the target before hand, we need to convert to the standard convention.
+                            converterKindNeeded = ReadyToRunConverterKind.GenericToStandard;
+
+                            // Use the method signature that contains type variables. The runtime will use the instantiated signature.
+                            targetMethod = (MethodDesc)GetRuntimeDeterminedObjectForToken(ref pResolvedToken);
+                        }
+
                         pResult->codePointerOrStubLookup.constLookup = CreateConstLookupToSymbol(
                             _compilation.SymbolNodeFactory.InterfaceDispatchCell(
                                 new MethodWithToken(targetMethod, HandleToModuleToken(ref pResolvedToken, targetMethod), constrainedType: null),
                                 GetSignatureContext(),
                                 isUnboxingStub: false,
-                                _compilation.NameMangler.GetMangledMethodName(MethodBeingCompiled).ToString()));
+                                _compilation.NameMangler.GetMangledMethodName(MethodBeingCompiled).ToString(),
+                                converterKindNeeded));
                         }
                     break;
 
@@ -1497,14 +1518,30 @@ namespace Internal.JitInterface
                             nonUnboxingMethod = rawPinvoke.Target;
                         }
 
-                        // READYTORUN: FUTURE: Direct calls if possible
-                        pResult->codePointerOrStubLookup.constLookup = CreateConstLookupToSymbol(
+                        if ((pResult->methodFlags & (uint)CorInfoFlag.CORINFO_FLG_DELEGATE_INVOKE) != 0 &&
+                            MethodBeingCompiled.IsCanonicalMethod(CanonicalFormKind.Universal) &&
+                            targetMethod.IsCanonicalMethod(CanonicalFormKind.Universal))
+                        {
+                            // Delegate invoke from universal generic code, where the delegate is also a universal generic.
+                            // In these cases, the target of the delegate is computed by a dictionary lookup, and will always be the entry point
+                            // of a non universal generic MethodDesc. For this reason, we need to convert from the generic to the standard convention here
+
+                            pResult->callConverterKind = (uint)ReadyToRunConverterKind.GenericToStandard;
+
+                            // Typical definition signatures are used since there is no __UniversalCanon type at runtime
+                            targetMethod = targetMethod.GetTypicalMethodDefinition();
+                        }
+                        else
+                        {
+                            // READYTORUN: FUTURE: Direct calls if possible
+                            pResult->codePointerOrStubLookup.constLookup = CreateConstLookupToSymbol(
                             _compilation.NodeFactory.MethodEntrypoint(
                                 new MethodWithToken(nonUnboxingMethod, HandleToModuleToken(ref pResolvedToken, nonUnboxingMethod), constrainedType),
                                 isUnboxingStub,
                                 isInstantiatingStub: useInstantiatingStub,
                                 isPrecodeImportRequired: (flags & CORINFO_CALLINFO_FLAGS.CORINFO_CALLINFO_LDFTN) != 0,
                                 GetSignatureContext()));
+                        }
                     }
                     break;
 
@@ -1514,6 +1551,22 @@ namespace Internal.JitInterface
                     break;
 
                 case CORINFO_CALL_KIND.CORINFO_VIRTUALCALL_LDVIRTFTN:
+                    if (MethodBeingCompiled.IsCanonicalMethod(CanonicalFormKind.Universal) && (flags & CORINFO_CALLINFO_FLAGS.CORINFO_CALLINFO_LDFTN) == 0)
+                    {
+                        if (pResult->exactContextNeedsRuntimeLookup)
+                        {
+                            // This is a callvirt site from universal generics code where the target requires a dictionary lookup. Virtual calls could end up in non-USG code, so we
+                            // need to convert from the universal generics convention to the standard one
+                            Debug.Assert(targetMethod.IsCanonicalMethod(CanonicalFormKind.Universal));
+                            pResult->callConverterKind = (uint)ReadyToRunConverterKind.GenericToStandard;
+                        }
+                        else
+                        {
+                            // If the method we're calling does not require a dictionary lookup, it has to be non-USG. In that case, the codegen can correctly pass the arguments
+                            // to the target method without the need for a converter, because the signature of the target method is known.
+                            Debug.Assert(!targetMethod.IsCanonicalMethod(CanonicalFormKind.Universal));
+                        }
+                    }
                     if (!pResult->exactContextNeedsRuntimeLookup)
                     {
                         bool atypicalCallsite = (flags & CORINFO_CALLINFO_FLAGS.CORINFO_CALLINFO_ATYPICAL_CALLSITE) != 0;
@@ -1684,7 +1737,7 @@ namespace Internal.JitInterface
                 pResult.handleType = CorInfoGenericHandleType.CORINFO_HANDLETYPE_FIELD;
                 pResult.compileTimeHandle = (CORINFO_GENERIC_STRUCT_*)pResolvedToken.hField;
 
-                runtimeLookup = fd.IsStatic && td.IsCanonicalSubtype(CanonicalFormKind.Specific);
+                runtimeLookup = fd.IsStatic && td.IsCanonicalSubtype(CanonicalFormKind.Any);
             }
             else
             {
@@ -1710,7 +1763,7 @@ namespace Internal.JitInterface
 
                 // IsSharedByGenericInstantiations would not work here. The runtime lookup is required
                 // even for standalone generic variables that show up as __Canon here.
-                runtimeLookup = td.IsCanonicalSubtype(CanonicalFormKind.Specific);
+                runtimeLookup = td.IsCanonicalSubtype(CanonicalFormKind.Any);
             }
 
             Debug.Assert(pResult.compileTimeHandle != null);

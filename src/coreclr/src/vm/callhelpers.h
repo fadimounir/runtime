@@ -698,6 +698,17 @@ enum DispatchCallSimpleFlags
 
 void CallDefaultConstructor(OBJECTREF ref);
 
+#if defined(FEATURE_SHARE_GENERIC_CODE) 
+struct ConverterThunkData
+{
+    CORCOMPILE_CONVERTER_KIND Kind;
+    MethodDesc* Method;
+    PCODE Code;
+};
+
+Stub* MakeCallConverterThunkStub(ConverterThunkData* pData);
+#endif // FEATURE_SHARE_GENERIC_CODE
+
 #endif //!DACCESS_COMPILE && !CROSSGEN_COMPILE
 
 #endif // __CALLHELPERS_H__

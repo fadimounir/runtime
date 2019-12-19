@@ -1267,12 +1267,16 @@ namespace Internal.JitInterface
             {
                 result |= CorInfoFlag.CORINFO_FLG_VALUECLASS;
 
-                if (metadataType.IsByRefLike)
-                    result |= CorInfoFlag.CORINFO_FLG_CONTAINS_STACK_PTR;
+                // HACK - USG
+                if (!type.IsCanonicalSubtype(CanonicalFormKind.Universal))
+                {
+                    if (metadataType.IsByRefLike)
+                        result |= CorInfoFlag.CORINFO_FLG_CONTAINS_STACK_PTR;
 
-                // The CLR has more complicated rules around CUSTOMLAYOUT, but this will do.
-                if (metadataType.IsExplicitLayout || metadataType.IsWellKnownType(WellKnownType.TypedReference))
-                    result |= CorInfoFlag.CORINFO_FLG_CUSTOMLAYOUT;
+                    // The CLR has more complicated rules around CUSTOMLAYOUT, but this will do.
+                    if (metadataType.IsExplicitLayout || metadataType.IsWellKnownType(WellKnownType.TypedReference))
+                        result |= CorInfoFlag.CORINFO_FLG_CUSTOMLAYOUT;
+                }
 
                 // TODO
                 // if (type.IsUnsafeValueType)
@@ -1343,6 +1347,11 @@ namespace Internal.JitInterface
         private uint getClassSize(CORINFO_CLASS_STRUCT_* cls)
         {
             TypeDesc type = HandleToObject(cls);
+
+            //HACK
+            if (type.IsCanonicalSubtype(CanonicalFormKind.Universal))
+                return (uint)IntPtr.Size;
+
             LayoutInt classSize = type.GetElementSize();
 #if READYTORUN
             if (classSize.IsIndeterminate)
@@ -1464,6 +1473,13 @@ namespace Internal.JitInterface
             uint result = 0;
 
             DefType type = (DefType)HandleToObject(cls);
+
+            // HACK
+            if (type.IsCanonicalSubtype(CanonicalFormKind.Universal))
+            {
+                gcPtrs[0] = (byte)CorInfoGCType.TYPE_GC_BYREF;
+                return 0;
+            }
 
             int pointerSize = PointerSize;
 

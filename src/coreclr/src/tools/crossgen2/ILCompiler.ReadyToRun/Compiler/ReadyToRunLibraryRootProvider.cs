@@ -102,6 +102,30 @@ namespace ILCompiler
                     }
 
                     RootMethods(typeWithMethods, "Library module method", rootProvider);
+
+                    if (type.HasInstantiation)
+                    {
+                        bool hasConstraints = false;
+                        foreach (GenericParameterDesc genParam in type.Instantiation)
+                        {
+                            if (genParam.Constraints != GenericConstraints.None)
+                            {
+                                hasConstraints = true;
+                                break;
+                            }
+                        }
+
+                        // TODO: Support USG compilations for generics with constraints.
+                        if (hasConstraints)
+                            continue;
+
+                        TypeDesc[] typeArgs = new TypeDesc[type.Instantiation.Length];
+                        for (int i = 0; i < typeArgs.Length; i++)
+                            typeArgs[i] = type.Context.UniversalCanonType;
+
+                        TypeDesc usgType = type.Context.GetInstantiatedType((MetadataType)type, new Instantiation(typeArgs));
+                        RootMethods(usgType, "Library module method", rootProvider);
+                    }
                 }
             }
         }
@@ -171,7 +195,7 @@ namespace ILCompiler
         {
             DefType defType = type as DefType;
 
-            if (defType != null)
+            if (defType != null && !type.IsCanonicalSubtype(CanonicalFormKind.Universal))
             {
                 defType.ComputeTypeContainsGCPointers();
                 if (defType.InstanceFieldSize.IsIndeterminate)

@@ -662,6 +662,8 @@ enum CorInfoHelpFunc
 
     CORINFO_HELP_STACK_PROBE,               // Probes each page of the allocated stack frame
 
+    CORINFO_HELP_CALL_CONVERTER_THUNK,      // Construct a calling convention converter thunk
+
     CORINFO_HELP_COUNT,
 };
 
@@ -1701,7 +1703,9 @@ struct CORINFO_CALL_INFO
         CORINFO_LOOKUP      codePointerLookup;
     };
 
-    CORINFO_CONST_LOOKUP    instParamLookup;    // Used by Ready-to-Run
+    // Used by Ready-to-Run
+    CORINFO_CONST_LOOKUP    instParamLookup;
+    unsigned                callConverterKind;
 
     BOOL                    wrapperDelegateInvoke;
 };

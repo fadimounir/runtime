@@ -57,10 +57,22 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
 
             foreach (MethodWithGCInfo method in r2rFactory.EnumerateCompiledMethods())
             {
+                int token = -1;
+
                 if (method.Method is EcmaMethod ecmaMethod)
                 {
+                    token = MetadataTokens.GetToken(ecmaMethod.Handle);
+                }
+                else if (method.Method.IsCanonicalMethod(CanonicalFormKind.Universal) && (method.Method.GetTypicalMethodDefinition() is EcmaMethod ecmaMethodDef))
+                {
+                    // USG methods have only one possible instantiation, and are emitted to the MethodEntryPointTable
+                    token = MetadataTokens.GetToken(ecmaMethodDef.Handle);
+                }
+
+                if (token != -1)
+                {
                     // Strip away the token type bits, keep just the low 24 bits RID
-                    uint rid = SignatureBuilder.RidFromToken((mdToken)MetadataTokens.GetToken(ecmaMethod.Handle));
+                    uint rid = SignatureBuilder.RidFromToken((mdToken)token);
                     Debug.Assert(rid != 0);
                     rid--;
 

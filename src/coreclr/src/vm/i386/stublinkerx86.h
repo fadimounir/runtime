@@ -369,13 +369,14 @@ class StubLinkerCPU : public StubLinker
 #ifdef _TARGET_X86_
         VOID EmitUnboxMethodStub(MethodDesc* pRealMD);
 #endif // _TARGET_X86_
-        VOID EmitTailJumpToMethod(MethodDesc *pMD);
+        VOID EmitTailJumpToMethod(MethodDesc *pMD, PCODE pTargetUSGCode);
 #ifdef _TARGET_AMD64_
         VOID EmitLoadMethodAddressIntoAX(MethodDesc *pMD);
 #endif
 
 #if defined(FEATURE_SHARE_GENERIC_CODE)
-        VOID EmitInstantiatingMethodStub(MethodDesc* pSharedMD, void* extra);
+        VOID EmitCallConverterThunk(UINT_PTR pData);
+        VOID EmitInstantiatingMethodStub(MethodDesc* pMD, void* extra, PCODE pTargetUSGCode);
 #endif // FEATURE_SHARE_GENERIC_CODE
         VOID EmitComputedInstantiatingMethodStub(MethodDesc* pSharedMD, struct ShuffleEntry *pShuffleEntryArray, void* extraArg);
 
