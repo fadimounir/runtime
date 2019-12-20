@@ -356,6 +356,8 @@ namespace ILCompiler.DependencyAnalysis
 
         public ManifestMetadataTableNode ManifestMetadataTable;
 
+        public PInvokeILStubsTableNode PInvokeILStubsTable;
+
         public TypesTableNode TypesTable;
 
         public ImportSectionsTableNode ImportSectionsTable;
@@ -591,6 +593,9 @@ namespace ILCompiler.DependencyAnalysis
 
             ManifestMetadataTable = new ManifestMetadataTableNode(InputModuleContext.GlobalContext, this);
             Header.Add(Internal.Runtime.ReadyToRunSectionType.ManifestMetadata, ManifestMetadataTable, ManifestMetadataTable);
+
+            PInvokeILStubsTable = new PInvokeILStubsTableNode(InputModuleContext.GlobalContext);
+            Header.Add(Internal.Runtime.ReadyToRunSectionType.PInvokeILStubs, PInvokeILStubsTable, PInvokeILStubsTable);
 
             Resolver.SetModuleIndexLookup(ManifestMetadataTable.ModuleToIndex);
 

@@ -42,6 +42,7 @@ class ReadyToRunInfo
     NativeFormat::NativeHashtable   m_availableTypesHashtable;
     NativeFormat::NativeHashtable   m_pMetaDataHashtable;
     NativeFormat::NativeCuckooFilter m_attributesPresence;
+    NativeFormat::NativeArray       m_pinvokeILStubs;
 
     Crst                            m_Crst;
     PtrHashMap                      m_entryPointToMethodDescMap;
@@ -58,6 +59,8 @@ public:
     PCODE GetEntryPoint(MethodDesc * pMD, PrepareCodeConfig* pConfig, BOOL fFixups);
 
     MethodDesc * GetMethodDescForEntryPoint(PCODE entryPoint);
+
+    BOOL LinkPInvokeILStub(NDirectMethodDesc* pNMD, MethodDesc* pStubMD);
 
     BOOL HasHashtableOfTypes();
     BOOL TryLookupTypeTokenFromName(const NameHandle *pName, mdToken * pFoundTypeToken);

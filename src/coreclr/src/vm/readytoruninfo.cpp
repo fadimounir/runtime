@@ -627,6 +627,17 @@ ReadyToRunInfo::ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYT
 
         m_attributesPresence = newFilter;
     }
+
+    // For format version 4.2 and later, there is a section with all the PInvoke ILStubs
+    if (IsImageVersionAtLeast(4, 2))
+    {
+        IMAGE_DATA_DIRECTORY* pILStubsInfoDir = FindSection(READYTORUN_SECTION_PINVOKE_ILSTUBS);
+        if (pILStubsInfoDir != NULL)
+        {
+            m_pinvokeILStubs = NativeArray(&m_nativeReader, pILStubsInfoDir->VirtualAddress);
+        }
+    }
+
 }
 
 static bool SigMatchesMethodDesc(MethodDesc* pMD, SigPointer &sig, Module * pModule)
@@ -1045,5 +1056,124 @@ void ReadyToRunInfo::DisableCustomAttributeFilter()
 {
     m_attributesPresence.DisableFilter();
 }
+
+BOOL ReadyToRunInfo::LinkPInvokeILStub(NDirectMethodDesc* pNMD, MethodDesc* pStubMD)
+{
+    CONTRACTL
+    {
+        GC_TRIGGERS;
+        THROWS;
+        MODE_ANY;
+        PRECONDITION(CheckPointer(pNMD) && pNMD->IsNDirect());
+        PRECONDITION(CheckPointer(pStubMD) && pStubMD->IsDynamicMethod());
+        PRECONDITION(pStubMD->AsDynamicMethodDesc()->IsILStub());
+        PRECONDITION(pStubMD->AsDynamicMethodDesc()->IsPInvokeStub());
+    }
+    CONTRACTL_END;
+
+    mdToken token = pNMD->GetMemberDef();
+    int rid = RidFromToken(token);
+    if (rid == 0)
+        return FALSE;
+
+    uint offset, currentOffset;
+    if (!m_pinvokeILStubs.TryGetAt(rid - 1, &offset))
+        return FALSE;
+
+    NativeParser parser(&m_nativeReader, offset);
+
+    DWORD maxStack = parser.GetUnsigned();
+
+    DWORD numEHClauses = parser.GetUnsigned();
+    NativeParser ehClausesParser(&m_nativeReader, parser.GetOffset());
+
+    DWORD cbSig = parser.GetUnsigned();
+    currentOffset = parser.GetOffset();
+    PCCOR_SIGNATURE pbLocalSig = (PCCOR_SIGNATURE)parser.GetBlob();
+    parser.SetOffset(currentOffset + cbSig);
+
+    DWORD cbILCode = parser.GetUnsigned();
+    currentOffset = parser.GetOffset();
+    const BYTE* pILCode = parser.GetBlob();
+    parser.SetOffset(currentOffset + cbILCode);
+
+    DWORD numTokens = parser.GetUnsigned();
+    NewHolder<TokenLookupMap> pTokenMap = new TokenLookupMap();
+    for (DWORD i = 0; i < numTokens; i++)
+    {
+        DWORD cbTokenSig = parser.GetUnsigned();
+        PCCOR_SIGNATURE pBlob = (PCCOR_SIGNATURE)parser.GetBlob();
+
+        CORCOMPILE_FIXUP_BLOB_KIND signatureKind = (CORCOMPILE_FIXUP_BLOB_KIND)*pBlob++;
+        switch (signatureKind)
+        {
+        case ENCODE_PINVOKE_TARGET:
+            pTokenMap->GetToken(pNMD);
+            break;
+
+        case ENCODE_TYPE_HANDLE:
+            {
+                TypeHandle typeHnd = ZapSig::DecodeType(m_pModule, m_pModule, pBlob, CLASS_LOADED);
+                _ASSERTE(!typeHnd.IsNull());
+                pTokenMap->GetToken(typeHnd);
+            }
+            break;
+
+        case ENCODE_METHOD_HANDLE:
+            {
+                TypeHandle th;
+                MethodDesc* pMD = ZapSig::DecodeMethod(m_pModule, m_pModule, pBlob, &th);
+                _ASSERTE(pMD != NULL);
+                pTokenMap->GetToken(pMD);
+            }
+            break;
+        }
+
+        parser.SetOffset(parser.GetOffset() + cbTokenSig);
+    }
+
+    ILStubResolver* pResolver = pStubMD->AsDynamicMethodDesc()->GetILStubResolver();
+    {
+        pResolver->SetStubMethodDesc(pStubMD);
+        pResolver->SetStubTargetMethodDesc(pNMD);
+
+        COR_ILMETHOD_DECODER* pILHeader = pResolver->AllocGeneratedIL(cbILCode, cbSig, maxStack);
+        memcpy((BYTE*)pILHeader->Code, pILCode, cbILCode);
+        memcpy((BYTE*)pILHeader->LocalVarSig, pbLocalSig, cbSig);
+
+        if (numEHClauses > 0)
+        {
+            COR_ILMETHOD_SECT_EH* pEHSect = pResolver->AllocEHSect(numEHClauses);
+            pEHSect->Fat.Kind = (CorILMethod_Sect_EHTable | CorILMethod_Sect_FatFormat);
+            pEHSect->Fat.DataSize = COR_ILMETHOD_SECT_EH_FAT::Size(numEHClauses);
+
+            for (DWORD i = 0; i < numEHClauses; i++)
+            {
+                pEHSect->Fat.Clauses[i].Flags = (CorExceptionFlag)ehClausesParser.GetSigned();
+                pEHSect->Fat.Clauses[i].TryOffset = ehClausesParser.GetSigned();
+                pEHSect->Fat.Clauses[i].TryLength = ehClausesParser.GetSigned();
+                pEHSect->Fat.Clauses[i].HandlerOffset = ehClausesParser.GetSigned();
+                pEHSect->Fat.Clauses[i].HandlerLength = ehClausesParser.GetSigned();
+                if ((pEHSect->Fat.Clauses[i].Flags & COR_ILEXCEPTION_CLAUSE_FILTER) != 0)
+                    pEHSect->Fat.Clauses[i].FilterOffset = ehClausesParser.GetSigned();
+                else
+                    pEHSect->Fat.Clauses[i].ClassToken = ehClausesParser.GetSigned();
+            }
+        }
+
+        pResolver->SetTokenLookupMap(pTokenMap);
+        pTokenMap.SuppressRelease();
+
+        DWORD cbMethodSig;
+        PCCOR_SIGNATURE pMethodSig;
+        pNMD->GetSig(&pMethodSig, &cbMethodSig);
+        pResolver->SetStubTargetMethodSig(pMethodSig, cbMethodSig);
+
+        pResolver->SetJitFlags(CORJIT_FLAGS(CORJIT_FLAGS::CORJIT_FLAG_IL_STUB));
+    }
+
+    return TRUE;
+}
+
 
 #endif // DACCESS_COMPILE

@@ -898,11 +898,21 @@ MethodDesc *ZapSig::DecodeMethod(Module *pReferencingModule,
             }
             else
             {
+                if (methodFlags & ENCODE_METHOD_SIG_OwnerType)
+                {
+                    _ASSERTE(!thOwner.IsNull());
+                    pInfoModule = thOwner.GetModule();
+                }
                 pMethod = MemberLoader::GetMethodDescFromMemberRefAndType(pInfoModule, TokenFromRid(rid, mdtMemberRef), thOwner.GetMethodTable());
             }
         }
         else
         {
+            if (methodFlags & ENCODE_METHOD_SIG_OwnerType)
+            {
+                _ASSERTE(!thOwner.IsNull());
+                pInfoModule = thOwner.GetModule();
+            }
             pMethod = MemberLoader::GetMethodDescFromMethodDef(pInfoModule, TokenFromRid(rid, mdtMethodDef), FALSE);
         }
     }

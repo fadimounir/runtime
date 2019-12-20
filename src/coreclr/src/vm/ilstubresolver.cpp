@@ -159,6 +159,7 @@ void ILStubResolver::ResolveToken(mdToken token, TypeHandle * pTH, MethodDesc **
         }
         break;
 
+    case mdtTypeRef:
     case mdtTypeDef:
         {
             TypeHandle typeHnd = m_pCompileTimeState->m_tokenLookupMap.LookupTypeDef(token);

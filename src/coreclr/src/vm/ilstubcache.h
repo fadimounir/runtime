@@ -93,6 +93,8 @@ public:
         SigTypeContext *pTypeContext,
         ILStubLinker* pStubLinker);
 
+    static MethodDesc* CreateILStubFromReadyToRunPInvokeStub(NDirectMethodDesc* pTargetNMD);
+
     MethodTable * GetStubMethodTable()
     {
         LIMITED_METHOD_CONTRACT;

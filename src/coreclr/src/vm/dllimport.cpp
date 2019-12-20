@@ -5904,7 +5904,16 @@ PCODE NDirect::GetStubForILStub(NDirectMethodDesc* pNMD, MethodDesc** ppStubMD, 
         PInvokeStaticSigInfo sigInfo;
         NDirect::PopulateNDirectMethodDesc(pNMD, &sigInfo, /* throwOnError = */ !SF_IsForNumParamBytes(dwStubFlags));
 
-        *ppStubMD = NDirect::GetILStubMethodDesc(pNMD, &sigInfo, dwStubFlags);
+        if (pNMD->GetModule()->IsReadyToRun() && strcmp(pNMD->GetModule()->GetSimpleName(), "program") == 0)
+        {
+            *ppStubMD = ILStubCache::CreateILStubFromReadyToRunPInvokeStub(pNMD);
+            pNMD->SetNotInline(FALSE);
+        }
+
+        if (*ppStubMD == NULL)
+        {
+            *ppStubMD = NDirect::GetILStubMethodDesc(pNMD, &sigInfo, dwStubFlags);
+        }
     }
 
     if (SF_IsForNumParamBytes(dwStubFlags))

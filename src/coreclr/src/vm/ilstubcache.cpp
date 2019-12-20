@@ -134,7 +134,38 @@ MethodDesc* ILStubCache::CreateAndLinkNewILStubMethodDesc(LoaderAllocator* pAllo
     pResolver->SetTokenLookupMap(pStubLinker->GetTokenLookupMap());
 
     RETURN pStubMD;
+}
 
+// static
+MethodDesc* ILStubCache::CreateILStubFromReadyToRunPInvokeStub(NDirectMethodDesc* pTargetNMD)
+{
+    CONTRACTL
+    {
+        STANDARD_VM_CHECK;
+        PRECONDITION(CheckPointer(pTargetNMD, NULL_NOT_OK));
+        PRECONDITION(pTargetNMD->GetModule()->IsReadyToRun());
+    }
+    CONTRACTL_END;
+
+    AllocMemTracker amTracker;
+
+    Module* pModule = pTargetNMD->GetModule();
+    MethodTable* pMT = pModule->GetILStubCache()->GetOrCreateStubMethodTable(pModule);
+
+    DWORD cbSig;
+    PCCOR_SIGNATURE pSig;
+    pTargetNMD->GetSig(&pSig, &cbSig);
+
+    MethodDesc* pStubMD = ILStubCache::CreateNewMethodDesc(pModule->GetLoaderAllocator()->GetHighFrequencyHeap(), pMT, 0, 
+        pModule, pSig, cbSig, NULL, &amTracker);
+    
+    if (pModule->GetReadyToRunInfo()->LinkPInvokeILStub(pTargetNMD, pStubMD->AsDynamicMethodDesc()))
+    {
+        amTracker.SuppressRelease();
+        return pStubMD;
+    }
+
+    return NULL;
 }
 
 // static

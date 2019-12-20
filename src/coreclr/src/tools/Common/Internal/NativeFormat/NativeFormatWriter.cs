@@ -1666,6 +1666,88 @@ namespace Internal.NativeFormat
 #else
     internal
 #endif
+    class ILStubVertex : Vertex
+    {
+        uint _maxStack;
+        BlobVertex _ehBlob;
+        BlobVertex _ilCodeBlob;
+        BlobVertex _localSigBlob;
+        BlobVertex[] _tokenMap;
+
+        public ILStubVertex(uint maxStack, BlobVertex ehBlob, BlobVertex ilCodeBlob, BlobVertex localSigBlob, BlobVertex[] tokenMap)
+        {
+            _maxStack = maxStack;
+            _ehBlob = ehBlob;
+            _ilCodeBlob = ilCodeBlob;
+            _localSigBlob = localSigBlob;
+            _tokenMap = tokenMap;
+        }
+
+        internal override void Save(NativeWriter writer)
+        {
+            writer.WriteUnsigned(_maxStack);
+
+            _ehBlob.Save(writer);
+
+            writer.WriteUnsigned((uint)_localSigBlob.GetSize());
+            _localSigBlob.Save(writer);
+
+            writer.WriteUnsigned((uint)_ilCodeBlob.GetSize());
+            _ilCodeBlob.Save(writer);
+
+            writer.WriteUnsigned((uint)_tokenMap.Length);
+            foreach (var tokenSig in _tokenMap)
+            {
+                writer.WriteUnsigned((uint)tokenSig.GetSize());
+                tokenSig.Save(writer);
+            }
+        }
+
+        public override int GetHashCode()
+        {
+            return 19 * 31 +
+                ((int)_maxStack) * 23 +
+                647 * _ehBlob.GetHashCode() +
+                479 * _ilCodeBlob.GetHashCode() +
+                593 * _localSigBlob.GetHashCode() +
+                59 * _tokenMap.GetHashCode();
+        }
+
+        public override bool Equals(object obj)
+        {
+            if (obj is ILStubVertex other)
+            {
+                if (_maxStack != other._maxStack)
+                    return false;
+                if (!_ehBlob.Equals(other._ehBlob))
+                    return false;
+                if (!_ilCodeBlob.Equals(other._ilCodeBlob))
+                    return false;
+                if (!_localSigBlob.Equals(other._localSigBlob))
+                    return false;
+                if (_tokenMap != null || other._tokenMap != null)
+                {
+                    if (_tokenMap != null && other._tokenMap != null)
+                    {
+                        if (_tokenMap.Length != other._tokenMap.Length)
+                            return false;
+                        for (int i = 0; i < _tokenMap.Length; i++)
+                            if (!_tokenMap[i].Equals(other._tokenMap[i]))
+                                return false;
+                    }
+                }
+
+                return true;
+            }
+            return false;
+        }
+    }
+
+#if NATIVEFORMAT_PUBLICWRITER
+    public
+#else
+    internal
+#endif
     class VertexArray : Vertex
     {
         private const int BlockSize = 16;

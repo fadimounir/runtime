@@ -625,6 +625,12 @@ namespace Internal.IL.Stubs
         {
             return _tokens[(token & 0xFFFFFF) - 1];
         }
+
+        public IEnumerable<Object> GetTokenObjects()
+        {
+            foreach (var obj in _tokens)
+                yield return obj;
+        }
     }
 
     public class ILCodeLabel
@@ -693,12 +699,18 @@ namespace Internal.IL.Stubs
 
         public ILToken NewToken(MethodDesc value)
         {
-            return NewToken(value, 0x0a000000);
+            if (value.OwningType.HasInstantiation)
+                return NewToken(value, 0x0a000000);
+            else
+                return NewToken(value, 0x06000000);
         }
 
         public ILToken NewToken(FieldDesc value)
         {
-            return NewToken(value, 0x0a000000);
+            if (value.OwningType.HasInstantiation)
+                return NewToken(value, 0x0a000000);
+            else
+                return NewToken(value, 0x04000000);
         }
 
         public ILToken NewToken(string value)
