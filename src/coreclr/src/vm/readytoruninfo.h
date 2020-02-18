@@ -48,6 +48,8 @@ class ReadyToRunInfo
 
     PTR_PersistentInlineTrackingMapR2R m_pPersistentInlineTrackingMap;
 
+    TADDR                           m_pMultiCoreLoadData;
+
     ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYTORUN_HEADER * pHeader, AllocMemTracker *pamTracker);
 
 public:
@@ -166,6 +168,12 @@ public:
 
     bool MayHaveCustomAttribute(WellKnownAttribute attribute, mdToken token);
     void DisableCustomAttributeFilter();
+
+    TADDR GetMultiCoreLoadData()
+    {
+        LIMITED_METHOD_CONTRACT;
+        return m_pMultiCoreLoadData;
+    }
 
 private:
     BOOL GetTypeNameFromToken(IMDInternalImport * pImport, mdToken mdType, LPCUTF8 * ppszName, LPCUTF8 * ppszNameSpace);

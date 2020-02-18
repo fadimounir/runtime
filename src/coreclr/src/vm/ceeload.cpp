@@ -556,6 +556,14 @@ void Module::Initialize(AllocMemTracker *pamTracker, LPCWSTR szName)
     m_FixupCrst.Init(CrstModuleFixup, (CrstFlags)(CRST_HOST_BREAKABLE|CRST_REENTRANCY));
     m_InstMethodHashTableCrst.Init(CrstInstMethodHashTable, CRST_REENTRANCY);
     m_ISymUnmanagedReaderCrst.Init(CrstISymUnmanagedReader, CRST_DEBUGGER_THREAD);
+    m_pIndirectionCellCacheCrst.Init(CrstDomainLocalBlock);
+
+    // Allocate and initialize the table
+    NewHolder <IndirectionCellCache> tempGenericHandleCache(new IndirectionCellCache());
+    LockOwner sLock = { &m_pIndirectionCellCacheCrst, IsOwnerOfCrst };
+    if (!tempGenericHandleCache->Init(59, &sLock))
+        COMPlusThrowOM();
+    m_pIndirectionCellCache = tempGenericHandleCache.Extract();
 
     if (!m_file->HasNativeImage())
     {
@@ -14219,6 +14227,27 @@ bool Module::HasReferenceByName(LPCUTF8 pModuleName)
 
     return false;
 }
+
+HashDatum Module::GetOrInsertCachedIndirection(const IndirectionCellCacheKey* pKey, const HashDatum pValue)
+{
+    LIMITED_METHOD_CONTRACT;
+
+    CrstHolder lock(&m_pIndirectionCellCacheCrst);
+
+    HashDatum pResult = NULL;
+
+    if (m_pIndirectionCellCache->GetValue(pKey, &pResult))
+        return pResult;
+
+    if(pValue != NULL)
+    {
+        m_pIndirectionCellCache->InsertValue(pKey, pValue);
+        return pValue;
+    }
+
+    return NULL;
+}
+
 #endif
 
 #ifdef _MSC_VER

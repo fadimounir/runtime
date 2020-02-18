@@ -2298,6 +2298,251 @@ static PCODE PatchNonVirtualExternalMethod(MethodDesc * pMD, PCODE pCode, PTR_CO
     return pCode;
 }
 
+struct INDIRECTION_CELL_DATA
+{
+    CORCOMPILE_FIXUP_BLOB_KIND kind;
+    bool fVirtual;
+    bool fReliable;
+    DWORD slot;
+    TypeHandle th;
+    MethodDesc* pMD;
+    FieldDesc* pFD;
+    Module* pInfoModule;
+    PCODE pHelper;
+    PCCOR_SIGNATURE pSignatureBlob;
+    PTR_CORCOMPILE_IMPORT_SECTION pImportSection;
+};
+
+void ExternalMethodFixupWorker_Inner(TADDR                          pIndirection,
+                                     DWORD                          sectionIndex,
+                                     Module*                        pModule,
+                                     PTR_CORCOMPILE_IMPORT_SECTION  pImportSection,
+                                     int                            index,
+                                     INDIRECTION_CELL_DATA*         pResult)
+{
+    STANDARD_VM_CONTRACT;
+
+    ZeroMemory(pResult, sizeof(INDIRECTION_CELL_DATA));
+
+    bool fVirtual = false;
+    MethodDesc* pMD = NULL;
+    MethodTable* pMT = NULL;
+    DWORD slot = 0;
+
+    PEImageLayout* pNativeImage = pModule->GetNativeOrReadyToRunImage();
+
+    RVA rva = pNativeImage->GetDataRva(pIndirection);
+
+    PTR_DWORD pSignatures = dac_cast<PTR_DWORD>(pNativeImage->GetRvaData(pImportSection->Signatures));
+
+    PCCOR_SIGNATURE pBlob = (BYTE*)pNativeImage->GetRvaData(pSignatures[index]);
+    pResult->pSignatureBlob = pBlob;
+
+    BYTE kind = *pBlob++;
+
+    Module* pInfoModule = pModule;
+    if (kind & ENCODE_MODULE_OVERRIDE)
+    {
+        DWORD moduleIndex = CorSigUncompressData(pBlob);
+        pInfoModule = pModule->GetModuleFromIndex(moduleIndex);
+        kind &= ~ENCODE_MODULE_OVERRIDE;
+    }
+
+    TypeHandle th;
+    switch (kind)
+    {
+    case ENCODE_METHOD_ENTRY:
+    {
+        pMD = ZapSig::DecodeMethod(pModule, pInfoModule, pBlob);
+
+        if (pModule->IsReadyToRun())
+        {
+            // We do not emit activation fixups for version resilient references. Activate the target explicitly.
+            pMD->EnsureActive();
+        }
+
+        break;
+    }
+
+    case ENCODE_METHOD_ENTRY_DEF_TOKEN:
+    {
+        mdToken MethodDef = TokenFromRid(CorSigUncompressData(pBlob), mdtMethodDef);
+        pMD = MemberLoader::GetMethodDescFromMethodDef(pInfoModule, MethodDef, FALSE);
+
+        pMD->PrepareForUseAsADependencyOfANativeImage();
+
+        if (pModule->IsReadyToRun())
+        {
+            // We do not emit activation fixups for version resilient references. Activate the target explicitly.
+            pMD->EnsureActive();
+        }
+
+        break;
+    }
+
+    case ENCODE_METHOD_ENTRY_REF_TOKEN:
+    {
+        SigTypeContext typeContext;
+        mdToken MemberRef = TokenFromRid(CorSigUncompressData(pBlob), mdtMemberRef);
+        FieldDesc* pFD = NULL;
+
+        MemberLoader::GetDescFromMemberRef(pInfoModule, MemberRef, &pMD, &pFD, &typeContext, FALSE /* strict metadata checks */, &th);
+        _ASSERTE(pMD != NULL);
+
+        pMD->PrepareForUseAsADependencyOfANativeImage();
+
+        if (pModule->IsReadyToRun())
+        {
+            // We do not emit activation fixups for version resilient references. Activate the target explicitly.
+            pMD->EnsureActive();
+        }
+        else
+        {
+#ifdef FEATURE_WINMD_RESILIENT
+            // We do not emit activation fixups for version resilient references. Activate the target explicitly.
+            pMD->EnsureActive();
+#endif
+        }
+
+        break;
+    }
+
+    case ENCODE_VIRTUAL_ENTRY:
+    {
+        pMD = ZapSig::DecodeMethod(pModule, pInfoModule, pBlob, &th);
+
+    VirtualEntry:
+        pMD->PrepareForUseAsADependencyOfANativeImage();
+
+        if (pMD->IsVtableMethod())
+        {
+            slot = pMD->GetSlot();
+            pMT = th.IsNull() ? pMD->GetMethodTable() : th.GetMethodTable();
+
+            fVirtual = true;
+        }
+        else if (pModule->IsReadyToRun())
+        {
+            // We do not emit activation fixups for version resilient references. Activate the target explicitly.
+            pMD->EnsureActive();
+        }
+        break;
+    }
+
+    case ENCODE_VIRTUAL_ENTRY_DEF_TOKEN:
+    {
+        mdToken MethodDef = TokenFromRid(CorSigUncompressData(pBlob), mdtMethodDef);
+        pMD = MemberLoader::GetMethodDescFromMethodDef(pInfoModule, MethodDef, FALSE);
+
+        goto VirtualEntry;
+    }
+
+    case ENCODE_VIRTUAL_ENTRY_REF_TOKEN:
+    {
+        mdToken MemberRef = TokenFromRid(CorSigUncompressData(pBlob), mdtMemberRef);
+
+        FieldDesc* pFD = NULL;
+
+        SigTypeContext typeContext;
+        MemberLoader::GetDescFromMemberRef(pInfoModule, MemberRef, &pMD, &pFD, &typeContext, FALSE /* strict metadata checks */, &th, TRUE /* actual type required */);
+        _ASSERTE(pMD != NULL);
+
+        goto VirtualEntry;
+    }
+
+    case ENCODE_VIRTUAL_ENTRY_SLOT:
+    {
+        slot = CorSigUncompressData(pBlob);
+        pMT = ZapSig::DecodeType(pModule, pInfoModule, pBlob).GetMethodTable();
+
+        fVirtual = true;
+        break;
+    }
+
+    default:
+        _ASSERTE(!"Unexpected CORCOMPILE_FIXUP_BLOB_KIND");
+        ThrowHR(COR_E_BADIMAGEFORMAT);
+    }
+
+    pResult->kind = (CORCOMPILE_FIXUP_BLOB_KIND)kind;
+    pResult->fVirtual = fVirtual;
+    pResult->pMD = pMD;
+    pResult->th = TypeHandle(pMT);
+    pResult->slot = slot;
+    pResult->pImportSection = pImportSection;
+    pResult->pInfoModule = pInfoModule;
+}
+
+DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
+{
+    STANDARD_VM_CONTRACT;
+
+    if (GetThread() == NULL)
+        SetupThread();
+
+    MAKE_CURRENT_THREAD_AVAILABLE();
+
+    LoadLevelLimiter loadLevelLimiter;
+    GetThread()->SetLoadLevelLimiter(&loadLevelLimiter);
+
+    Module* pModule = (Module*)lpArgs;
+    _ASSERTE(pModule->IsReadyToRun());
+
+    TADDR pMulticoreData = pModule->GetReadyToRunInfo()->GetMultiCoreLoadData();
+    _ASSERTE(pMulticoreData != NULL);
+
+    BYTE* pBlob = (BYTE*)pMulticoreData;
+
+    int numMethodFixupEntries = *(int*)pBlob; pBlob += 4;
+    int numDynamicHelperFixupEntries = *(int*)pBlob; pBlob += 4;
+
+    for (int i = 0; i < numMethodFixupEntries; i++)
+    {
+        int sectionIndex = *(int*)pBlob; pBlob += 4;
+        int numEntries = *(int*)pBlob; pBlob += 4;
+
+        PTR_CORCOMPILE_IMPORT_SECTION pImportSection = pModule->GetImportSectionFromIndex(sectionIndex);
+
+        for (int j = 0; j < numEntries; j++)
+        {
+            TADDR pIndirection = *(TADDR*)pBlob;
+            pBlob += sizeof(TADDR*);
+
+            INDIRECTION_CELL_DATA* pFixupResult = NULL;
+
+            Module::IndirectionCellCacheKey key;
+            key.pIndirectionCell = pIndirection;
+            key.sectionIndex = sectionIndex;
+
+            if (pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL)
+                continue;
+
+#ifdef _DEBUG
+            PEImageLayout* pNativeImage = pModule->GetNativeOrReadyToRunImage();
+            RVA rva = pNativeImage->GetDataRva(pIndirection);
+
+            _ASSERTE(pImportSection == pModule->GetImportSectionForRVA(rva));
+            _ASSERTE(j == (rva - pImportSection->Section.VirtualAddress) / sizeof(TADDR));
+#endif
+
+            {
+                GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
+
+                pFixupResult = new INDIRECTION_CELL_DATA;
+                ExternalMethodFixupWorker_Inner(pIndirection, sectionIndex, pModule, pImportSection, j, pFixupResult);
+            }
+
+            pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
+
+            _ASSERTE(pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL);
+        }
+    }
+
+    GetThread()->EnablePreemptiveGC();
+
+    return 0;
+}
+
 //==========================================================================================
 // In NGen images calls to external methods start out pointing to jump thunks.
 // These jump thunks initially point to the assembly code _ExternalMethodFixupStub
@@ -2374,15 +2619,10 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
     INSTALL_MANAGED_EXCEPTION_DISPATCHER;
     INSTALL_UNWIND_AND_CONTINUE_HANDLER;
 
-    bool fVirtual = false;
-    MethodDesc * pMD = NULL;
-    MethodTable * pMT = NULL;
-    DWORD slot = 0;
-
     {
         GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
 
-        PEImageLayout *pNativeImage = pModule->GetNativeOrReadyToRunImage();
+        PEImageLayout* pNativeImage = pModule->GetNativeOrReadyToRunImage();
 
         RVA rva = pNativeImage->GetDataRva(pIndirection);
 
@@ -2410,140 +2650,38 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
             index = (rva - pImportSection->Section.VirtualAddress) / sizeof(TADDR);
         }
 
-        PTR_DWORD pSignatures = dac_cast<PTR_DWORD>(pNativeImage->GetRvaData(pImportSection->Signatures));
+        Module::IndirectionCellCacheKey key;
+        key.pIndirectionCell = pIndirection;
+        key.sectionIndex = sectionIndex;
 
-        PCCOR_SIGNATURE pBlob = (BYTE *)pNativeImage->GetRvaData(pSignatures[index]);
+        INDIRECTION_CELL_DATA* pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, NULL);
 
-        BYTE kind = *pBlob++;
-
-        Module * pInfoModule = pModule;
-        if (kind & ENCODE_MODULE_OVERRIDE)
+        if (pFixupResult == NULL)
         {
-            DWORD moduleIndex = CorSigUncompressData(pBlob);
-            pInfoModule = pModule->GetModuleFromIndex(moduleIndex);
-            kind &= ~ENCODE_MODULE_OVERRIDE;
+            pFixupResult = new INDIRECTION_CELL_DATA;
+            ExternalMethodFixupWorker_Inner(pIndirection, sectionIndex, pModule, pImportSection, index, pFixupResult);
+
+            INDIRECTION_CELL_DATA* pCachedFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
+            _ASSERTE(pCachedFixupResult != NULL);
+
+            if (pCachedFixupResult != pFixupResult)
+            {
+                printf("FOUND CACHED FIXUP (double load): " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
+
+                delete pFixupResult;
+                pFixupResult = pCachedFixupResult;
+            }
+            else
+            {
+                printf("Cache miss ... : " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
+            }
+        }
+        else
+        {
+            printf("FOUND CACHED FIXUP: " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
         }
 
-        TypeHandle th;
-        switch (kind)
-        {
-        case ENCODE_METHOD_ENTRY:
-            {
-                pMD =  ZapSig::DecodeMethod(pModule,
-                                            pInfoModule,
-                                            pBlob);
-
-                if (pModule->IsReadyToRun())
-                {
-                    // We do not emit activation fixups for version resilient references. Activate the target explicitly.
-                    pMD->EnsureActive();
-                }
-
-                break;
-            }
-
-        case ENCODE_METHOD_ENTRY_DEF_TOKEN:
-            {
-                mdToken MethodDef = TokenFromRid(CorSigUncompressData(pBlob), mdtMethodDef);
-                pMD = MemberLoader::GetMethodDescFromMethodDef(pInfoModule, MethodDef, FALSE);
-
-                pMD->PrepareForUseAsADependencyOfANativeImage();
-
-                if (pModule->IsReadyToRun())
-                {
-                    // We do not emit activation fixups for version resilient references. Activate the target explicitly.
-                    pMD->EnsureActive();
-                }
-
-                break;
-            }
-
-        case ENCODE_METHOD_ENTRY_REF_TOKEN:
-            {
-                SigTypeContext typeContext;
-                mdToken MemberRef = TokenFromRid(CorSigUncompressData(pBlob), mdtMemberRef);
-                FieldDesc * pFD = NULL;
-
-                MemberLoader::GetDescFromMemberRef(pInfoModule, MemberRef, &pMD, &pFD, &typeContext, FALSE /* strict metadata checks */, &th);
-                _ASSERTE(pMD != NULL);
-
-                pMD->PrepareForUseAsADependencyOfANativeImage();
-
-                if (pModule->IsReadyToRun())
-                {
-                    // We do not emit activation fixups for version resilient references. Activate the target explicitly.
-                    pMD->EnsureActive();
-                }
-                else
-                {
-#ifdef FEATURE_WINMD_RESILIENT
-                    // We do not emit activation fixups for version resilient references. Activate the target explicitly.
-                    pMD->EnsureActive();
-#endif
-                }
-
-                break;
-            }
-
-        case ENCODE_VIRTUAL_ENTRY:
-            {
-                pMD = ZapSig::DecodeMethod(pModule, pInfoModule, pBlob, &th);
-
-        VirtualEntry:
-                pMD->PrepareForUseAsADependencyOfANativeImage();
-
-                if (pMD->IsVtableMethod())
-                {
-                    slot = pMD->GetSlot();
-                    pMT = th.IsNull() ? pMD->GetMethodTable() : th.GetMethodTable();
-
-                    fVirtual = true;
-                }
-                else
-                if (pModule->IsReadyToRun())
-                {
-                    // We do not emit activation fixups for version resilient references. Activate the target explicitly.
-                    pMD->EnsureActive();
-                }
-                break;
-            }
-
-        case ENCODE_VIRTUAL_ENTRY_DEF_TOKEN:
-            {
-                mdToken MethodDef = TokenFromRid(CorSigUncompressData(pBlob), mdtMethodDef);
-                pMD = MemberLoader::GetMethodDescFromMethodDef(pInfoModule, MethodDef, FALSE);
-
-                goto VirtualEntry;
-            }
-
-        case ENCODE_VIRTUAL_ENTRY_REF_TOKEN:
-            {
-                mdToken MemberRef = TokenFromRid(CorSigUncompressData(pBlob), mdtMemberRef);
-
-                FieldDesc * pFD = NULL;
-
-                SigTypeContext typeContext;
-                MemberLoader::GetDescFromMemberRef(pInfoModule, MemberRef, &pMD, &pFD, &typeContext, FALSE /* strict metadata checks */, &th, TRUE /* actual type required */);
-                _ASSERTE(pMD != NULL);
-
-                goto VirtualEntry;
-            }
-
-        case ENCODE_VIRTUAL_ENTRY_SLOT:
-            {
-                slot = CorSigUncompressData(pBlob);
-                pMT =  ZapSig::DecodeType(pModule, pInfoModule, pBlob).GetMethodTable();
-
-                fVirtual = true;
-                break;
-            }
-
-        default:
-            _ASSERTE(!"Unexpected CORCOMPILE_FIXUP_BLOB_KIND");
-            ThrowHR(COR_E_BADIMAGEFORMAT);
-        }
-
-        if (fVirtual)
+        if (pFixupResult->fVirtual)
         {
             GCX_COOP_THREAD_EXISTS(CURRENT_THREAD);
 
@@ -2556,35 +2694,38 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
                 COMPlusThrow(kNullReferenceException);
             }
 
+            _ASSERTE(!pFixupResult->th.IsNull() && pFixupResult->th.AsMethodTable() != NULL);
+            MethodTable* pMT = pFixupResult->th.AsMethodTable();
+
             DispatchToken token;
             if (pMT->IsInterface() || MethodTable::VTableIndir_t::isRelative)
             {
                 if (pMT->IsInterface())
-                    token = pMT->GetLoaderAllocator()->GetDispatchToken(pMT->GetTypeID(), slot);
+                    token = pMT->GetLoaderAllocator()->GetDispatchToken(pMT->GetTypeID(), pFixupResult->slot);
                 else
-                    token = DispatchToken::CreateDispatchToken(slot);
+                    token = DispatchToken::CreateDispatchToken(pFixupResult->slot);
 
                 StubCallSite callSite(pIndirection, pEMFrame->GetReturnAddress());
                 pCode = pMgr->ResolveWorker(&callSite, protectedObj, token, VirtualCallStubManager::SK_LOOKUP);
             }
             else
             {
-                pCode = pMgr->GetVTableCallStub(slot);
+                pCode = pMgr->GetVTableCallStub(pFixupResult->slot);
                 *(TADDR *)pIndirection = pCode;
             }
             _ASSERTE(pCode != NULL);
         }
         else
         {
-            _ASSERTE(pMD != NULL);
+            _ASSERTE(pFixupResult->pMD != NULL);
 
             {
                 // Switch to cooperative mode to avoid racing with GC stackwalk
                 GCX_COOP_THREAD_EXISTS(CURRENT_THREAD);
-                pEMFrame->SetFunction(pMD);
+                pEMFrame->SetFunction(pFixupResult->pMD);
             }
 
-            pCode = pMD->GetMethodEntryPoint();
+            pCode = pFixupResult->pMD->GetMethodEntryPoint();
 
             //
             // Note that we do not want to call code:MethodDesc::IsPointingToPrestub() here. It does not take remoting
@@ -2593,15 +2734,15 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
             //
             if (!DoesSlotCallPrestub(pCode))
             {
-                if (pMD->IsVersionableWithVtableSlotBackpatch())
+                if (pFixupResult->pMD->IsVersionableWithVtableSlotBackpatch())
                 {
                     // The entry point for this method needs to be versionable, so use a FuncPtrStub similarly to what is done
                     // in MethodDesc::GetMultiCallableAddrOfCode()
                     GCX_COOP();
-                    pCode = pMD->GetLoaderAllocator()->GetFuncPtrStubs()->GetFuncPtrStub(pMD);
+                    pCode = pFixupResult->pMD->GetLoaderAllocator()->GetFuncPtrStubs()->GetFuncPtrStub(pFixupResult->pMD);
                 }
 
-                pCode = PatchNonVirtualExternalMethod(pMD, pCode, pImportSection, pIndirection);
+                pCode = PatchNonVirtualExternalMethod(pFixupResult->pMD, pCode, pFixupResult->pImportSection, pIndirection);
             }
         }
 
@@ -2861,10 +3002,7 @@ TADDR GetFirstArgumentRegisterValuePtr(TransitionBlock * pTransitionBlock)
 
 void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock,
                                     Module *                    pModule,
-                                    Module *                    pInfoModule,
-                                    BYTE                        kind,
-                                    PCCOR_SIGNATURE             pBlob,
-                                    PCCOR_SIGNATURE             pBlobStart,
+                                    INDIRECTION_CELL_DATA*      pFixupData,
                                     CORINFO_RUNTIME_LOOKUP *    pResult,
                                     DWORD *                     pDictionaryIndexAndSlot)
 {
@@ -2884,7 +3022,11 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
     MethodTable* pContextMT = NULL;
     MethodDesc* pContextMD = NULL;
 
-    if (kind == ENCODE_DICTIONARY_LOOKUP_METHOD)
+    PCCOR_SIGNATURE pBlob = pFixupData->pSignatureBlob;
+    if ((*pBlob++) & ENCODE_MODULE_OVERRIDE)
+        CorSigUncompressData(pBlob);
+
+    if (pFixupData->kind == ENCODE_DICTIONARY_LOOKUP_METHOD)
     {
         pContextMD = (MethodDesc*)genericContextPtr;
         numGenericArgs = pContextMD->GetNumGenericMethodArgs();
@@ -2894,9 +3036,9 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
     {
         pContextMT = (MethodTable*)genericContextPtr;
 
-        if (kind == ENCODE_DICTIONARY_LOOKUP_THISOBJ)
+        if (pFixupData->kind == ENCODE_DICTIONARY_LOOKUP_THISOBJ)
         {
-            TypeHandle contextTypeHandle = ZapSig::DecodeType(pModule, pInfoModule, pBlob);
+            TypeHandle contextTypeHandle = ZapSig::DecodeType(pModule, pFixupData->pInfoModule, pBlob);
 
             SigPointer p(pBlob);
             p.SkipExactlyOne();
@@ -2923,7 +3065,7 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
         CorElementType type;
         IfFailThrow(sigptr.GetElemType(&type));
 
-        if ((type == ELEMENT_TYPE_MVAR) && (kind == ENCODE_DICTIONARY_LOOKUP_METHOD))
+        if ((type == ELEMENT_TYPE_MVAR) && (pFixupData->kind == ENCODE_DICTIONARY_LOOKUP_METHOD))
         {
             pResult->indirections = 2;
             pResult->offsets[0] = offsetof(InstantiatedMethodDesc, m_pPerInstInfo);
@@ -2939,7 +3081,7 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
 
             return;
         }
-        else if ((type == ELEMENT_TYPE_VAR) && (kind != ENCODE_DICTIONARY_LOOKUP_METHOD))
+        else if ((type == ELEMENT_TYPE_VAR) && (pFixupData->kind != ENCODE_DICTIONARY_LOOKUP_METHOD))
         {
             pResult->indirections = 3;
             pResult->offsets[0] = MethodTable::GetOffsetOfPerInstInfo();
@@ -2969,9 +3111,9 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
 
     WORD dictionarySlot;
 
-    if (kind == ENCODE_DICTIONARY_LOOKUP_METHOD)
+    if (pFixupData->kind == ENCODE_DICTIONARY_LOOKUP_METHOD)
     {
-        if (DictionaryLayout::FindToken(pModule->GetLoaderAllocator(), numGenericArgs, pContextMD->GetDictionaryLayout(), pResult, (BYTE*)pBlobStart, 1, FromReadyToRunImage, &dictionarySlot))
+        if (DictionaryLayout::FindToken(pModule->GetLoaderAllocator(), numGenericArgs, pContextMD->GetDictionaryLayout(), pResult, (BYTE*)pFixupData->pSignatureBlob, 1, FromReadyToRunImage, &dictionarySlot))
         {
             pResult->testForNull = 1;
 
@@ -2990,7 +3132,7 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
     // It's a class dictionary lookup (CORINFO_LOOKUP_CLASSPARAM or CORINFO_LOOKUP_THISOBJ)
     else
     {
-        if (DictionaryLayout::FindToken(pModule->GetLoaderAllocator(), numGenericArgs, pContextMT->GetClass()->GetDictionaryLayout(), pResult, (BYTE*)pBlobStart, 2, FromReadyToRunImage, &dictionarySlot))
+        if (DictionaryLayout::FindToken(pModule->GetLoaderAllocator(), numGenericArgs, pContextMT->GetClass()->GetDictionaryLayout(), pResult, (BYTE*)pFixupData->pSignatureBlob, 2, FromReadyToRunImage, &dictionarySlot))
         {
             pResult->testForNull = 1;
 
@@ -3011,11 +3153,13 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
     }
 }
 
-PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD sectionIndex, Module * pModule, CORCOMPILE_FIXUP_BLOB_KIND * pKind, TypeHandle * pTH, MethodDesc ** ppMD, FieldDesc ** ppFD)
+void DynamicHelperFixup_Inner(TADDR* pCell, DWORD sectionIndex, Module* pModule, INDIRECTION_CELL_DATA* pResult)
 {
     STANDARD_VM_CONTRACT;
 
-    PEImageLayout *pNativeImage = pModule->GetNativeOrReadyToRunImage();
+    ZeroMemory(pResult, sizeof(INDIRECTION_CELL_DATA));
+
+    PEImageLayout* pNativeImage = pModule->GetNativeOrReadyToRunImage();
 
     RVA rva = pNativeImage->GetDataRva((TADDR)pCell);
 
@@ -3028,12 +3172,12 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
 
     PTR_DWORD pSignatures = dac_cast<PTR_DWORD>(pNativeImage->GetRvaData(pImportSection->Signatures));
 
-    PCCOR_SIGNATURE pBlob = (BYTE *)pNativeImage->GetRvaData(pSignatures[index]);
-    PCCOR_SIGNATURE pBlobStart = pBlob;
+    PCCOR_SIGNATURE pBlob = (BYTE*)pNativeImage->GetRvaData(pSignatures[index]);
+    pResult->pSignatureBlob = pBlob;
 
     BYTE kind = *pBlob++;
 
-    Module * pInfoModule = pModule;
+    Module* pInfoModule = pModule;
     if (kind & ENCODE_MODULE_OVERRIDE)
     {
         DWORD moduleIndex = CorSigUncompressData(pBlob);
@@ -3043,10 +3187,8 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
 
     bool fReliable = false;
     TypeHandle th;
-    MethodDesc * pMD = NULL;
-    FieldDesc * pFD = NULL;
-    CORINFO_RUNTIME_LOOKUP genericLookup;
-    DWORD dictionaryIndexAndSlot = -1;
+    MethodDesc* pMD = NULL;
+    FieldDesc* pFD = NULL;
 
     switch (kind)
     {
@@ -3054,6 +3196,7 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
         th = ZapSig::DecodeType(pModule, pInfoModule, pBlob);
         th.AsMethodTable()->EnsureInstanceActive();
         break;
+
     case ENCODE_ISINSTANCEOF_HELPER:
     case ENCODE_CHKCAST_HELPER:
         fReliable = true;
@@ -3101,7 +3244,7 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
     case ENCODE_DICTIONARY_LOOKUP_THISOBJ:
     case ENCODE_DICTIONARY_LOOKUP_TYPE:
     case ENCODE_DICTIONARY_LOOKUP_METHOD:
-        ProcessDynamicDictionaryLookup(pTransitionBlock, pModule, pInfoModule, kind, pBlob, pBlobStart, &genericLookup, &dictionaryIndexAndSlot);
+        // Transition block needed for this fixup kinds. Helper creation will be deferred to a later stage
         break;
 
     default:
@@ -3126,6 +3269,7 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
                     pHelper = DynamicHelpers::CreateHelperArgMove(pModule->GetLoaderAllocator(), th.AsTAddr(), CEEJitInfo::getHelperFtnStatic(helpFunc));
                 }
                 break;
+
             case ENCODE_THREAD_STATIC_BASE_NONGC_HELPER:
             case ENCODE_THREAD_STATIC_BASE_GC_HELPER:
             case ENCODE_STATIC_BASE_NONGC_HELPER:
@@ -3133,7 +3277,7 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
             case ENCODE_CCTOR_TRIGGER:
             case ENCODE_FIELD_ADDRESS:
                 {
-                    MethodTable * pMT = th.AsMethodTable();
+                    MethodTable* pMT = th.AsMethodTable();
 
                     bool fNeedsNonTrivialHelper = false;
 
@@ -3185,48 +3329,36 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
             // case ENCODE_VIRTUAL_ENTRY_DEF_TOKEN:
             // case ENCODE_VIRTUAL_ENTRY_REF_TOKEN:
             // case ENCODE_VIRTUAL_ENTRY_SLOT:
+                if (!pMD->IsVtableMethod())
                 {
-                   if (!pMD->IsVtableMethod())
-                   {
-                        pHelper = DynamicHelpers::CreateReturnConst(pModule->GetLoaderAllocator(), pMD->GetMultiCallableAddrOfCode());
-                    }
-                    else
-                    {
-                        AllocMemTracker amTracker;
+                    pHelper = DynamicHelpers::CreateReturnConst(pModule->GetLoaderAllocator(), pMD->GetMultiCallableAddrOfCode());
+                }
+                else
+                {
+                    AllocMemTracker amTracker;
 
-                        VirtualFunctionPointerArgs * pArgs = (VirtualFunctionPointerArgs *)amTracker.Track(
-                            pModule->GetLoaderAllocator()->GetHighFrequencyHeap()->
-                                AllocMem(S_SIZE_T(sizeof(VirtualFunctionPointerArgs))));
+                    VirtualFunctionPointerArgs* pArgs = (VirtualFunctionPointerArgs*)amTracker.Track(
+                        pModule->GetLoaderAllocator()->GetHighFrequencyHeap()->
+                        AllocMem(S_SIZE_T(sizeof(VirtualFunctionPointerArgs))));
 
-                        pArgs->classHnd = (CORINFO_CLASS_HANDLE)th.AsPtr();
-                        pArgs->methodHnd = (CORINFO_METHOD_HANDLE)pMD;
+                    pArgs->classHnd = (CORINFO_CLASS_HANDLE)th.AsPtr();
+                    pArgs->methodHnd = (CORINFO_METHOD_HANDLE)pMD;
 
-                        pHelper = DynamicHelpers::CreateHelperWithArg(pModule->GetLoaderAllocator(), (TADDR)pArgs,
-                            GetEEFuncEntryPoint(JIT_VirtualFunctionPointer_Dynamic));
+                    pHelper = DynamicHelpers::CreateHelperWithArg(pModule->GetLoaderAllocator(), (TADDR)pArgs,
+                        GetEEFuncEntryPoint(JIT_VirtualFunctionPointer_Dynamic));
 
-                        amTracker.SuppressRelease();
-                    }
+                    amTracker.SuppressRelease();
                 }
                 break;
 
             default:
                 UNREACHABLE();
             }
-
-            if (pHelper != NULL)
-            {
-                *(TADDR *)pCell = pHelper;
-            }
-
-#ifdef _DEBUG
-            // Always execute the reliable fallback in debug builds
-            pHelper = NULL;
-#endif
         }
         EX_CATCH
         {
         }
-        EX_END_CATCH (SwallowAllExceptions);
+        EX_END_CATCH(SwallowAllExceptions);
     }
     else
     {
@@ -3238,102 +3370,134 @@ PCODE DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWOR
                 pHelper = DynamicHelpers::CreateHelper(pModule->GetLoaderAllocator(), th.AsTAddr(), CEEJitInfo::getHelperFtnStatic(helpFunc));
             }
             break;
+
         case ENCODE_NEW_ARRAY_HELPER:
             {
                 CorInfoHelpFunc helpFunc = CEEInfo::getNewArrHelperStatic(th);
-                MethodTable *pArrayMT = th.AsMethodTable();
+                MethodTable* pArrayMT = th.AsMethodTable();
                 pHelper = DynamicHelpers::CreateHelperArgMove(pModule->GetLoaderAllocator(), dac_cast<TADDR>(pArrayMT), CEEJitInfo::getHelperFtnStatic(helpFunc));
             }
             break;
 
         case ENCODE_DELEGATE_CTOR:
-            {
-                MethodTable * pDelegateType = NULL;
-
-                {
-                    GCX_COOP();
-
-                    TADDR pArgument = GetFirstArgumentRegisterValuePtr(pTransitionBlock);
-
-                    if (pArgument != NULL)
-                    {
-                        pDelegateType = (*(Object **)pArgument)->GetMethodTable();
-                        _ASSERTE(pDelegateType->IsDelegate());
-                    }
-                }
-
-                DelegateCtorArgs ctorData;
-                ctorData.pMethod = NULL;
-                ctorData.pArg3 = NULL;
-                ctorData.pArg4 = NULL;
-                ctorData.pArg5 = NULL;
-
-                MethodDesc * pDelegateCtor = NULL;
-
-                if (pDelegateType != NULL)
-                {
-                    pDelegateCtor = COMDelegate::GetDelegateCtor(TypeHandle(pDelegateType), pMD, &ctorData);
-
-                    if (ctorData.pArg4 != NULL || ctorData.pArg5 != NULL)
-                    {
-                        // This should never happen - we should never get collectible or wrapper delegates here
-                        _ASSERTE(false);
-                        pDelegateCtor = NULL;
-                    }
-                }
-
-                TADDR target = NULL;
-
-                if (pDelegateCtor != NULL)
-                {
-                    target = pDelegateCtor->GetMultiCallableAddrOfCode();
-                }
-                else
-                {
-                    target = ECall::GetFCallImpl(MscorlibBinder::GetMethod(METHOD__DELEGATE__CONSTRUCT_DELEGATE));
-                    ctorData.pArg3 = NULL;
-                }
-
-                if (ctorData.pArg3 != NULL)
-                {
-                    pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pMD->GetMultiCallableAddrOfCode(), (TADDR)ctorData.pArg3, target);
-                }
-                else
-                {
-                    pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pMD->GetMultiCallableAddrOfCode(), target);
-                }
-            }
-            break;
-
         case ENCODE_DICTIONARY_LOOKUP_THISOBJ:
         case ENCODE_DICTIONARY_LOOKUP_TYPE:
         case ENCODE_DICTIONARY_LOOKUP_METHOD:
-            {
-                pHelper = DynamicHelpers::CreateDictionaryLookupHelper(pModule->GetLoaderAllocator(), &genericLookup, dictionaryIndexAndSlot, pModule);
-            }
+            // Transition block needed for this fixup kinds. Helper creation will be deferred to a later stage
             break;
 
         default:
             UNREACHABLE();
         }
-
-        if (pHelper != NULL)
-        {
-            *(TADDR *)pCell = pHelper;
-        }
     }
 
-    *pKind = (CORCOMPILE_FIXUP_BLOB_KIND)kind;
-    *pTH = th;
-    *ppMD = pMD;
-    *ppFD = pFD;
+    INDIRECTION_CELL_DATA result;
+    pResult->kind = (CORCOMPILE_FIXUP_BLOB_KIND)kind;
+    pResult->fReliable = fReliable;
+    pResult->th = th;
+    pResult->pMD = pMD;
+    pResult->pFD = pFD;
+    pResult->pHelper = pHelper;
+    pResult->pImportSection = pImportSection;
+    pResult->pInfoModule = pInfoModule;
+}
 
-    return pHelper;
+void DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD sectionIndex, Module * pModule, INDIRECTION_CELL_DATA* pFixupResult)
+{
+    STANDARD_VM_CONTRACT;
+
+    DynamicHelperFixup_Inner(pCell, sectionIndex, pModule, pFixupResult);
+
+    if (pFixupResult->pHelper != NULL)
+    {
+        *(TADDR*)pCell = pFixupResult->pHelper;
+
+#ifdef _DEBUG
+        // Always execute the reliable fallback in debug builds
+        if (pFixupResult->fReliable)
+            pFixupResult->pHelper = NULL;
+#endif
+    }
+
+    if (!pFixupResult->fReliable)
+    {
+        if (pFixupResult->kind == ENCODE_DELEGATE_CTOR)
+        {
+            MethodTable* pDelegateType = NULL;
+
+            {
+                GCX_COOP();
+
+                TADDR pArgument = GetFirstArgumentRegisterValuePtr(pTransitionBlock);
+
+                if (pArgument != NULL)
+                {
+                    pDelegateType = (*(Object**)pArgument)->GetMethodTable();
+                    _ASSERTE(pDelegateType->IsDelegate());
+                }
+            }
+
+            DelegateCtorArgs ctorData;
+            ctorData.pMethod = NULL;
+            ctorData.pArg3 = NULL;
+            ctorData.pArg4 = NULL;
+            ctorData.pArg5 = NULL;
+
+            MethodDesc* pDelegateCtor = NULL;
+
+            if (pDelegateType != NULL)
+            {
+                pDelegateCtor = COMDelegate::GetDelegateCtor(TypeHandle(pDelegateType), pFixupResult->pMD, &ctorData);
+
+                if (ctorData.pArg4 != NULL || ctorData.pArg5 != NULL)
+                {
+                    // This should never happen - we should never get collectible or wrapper delegates here
+                    _ASSERTE(false);
+                    pDelegateCtor = NULL;
+                }
+            }
+
+            TADDR target = NULL;
+
+            if (pDelegateCtor != NULL)
+            {
+                target = pDelegateCtor->GetMultiCallableAddrOfCode();
+            }
+            else
+            {
+                target = ECall::GetFCallImpl(MscorlibBinder::GetMethod(METHOD__DELEGATE__CONSTRUCT_DELEGATE));
+                ctorData.pArg3 = NULL;
+            }
+
+            if (ctorData.pArg3 != NULL)
+            {
+                pFixupResult->pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pFixupResult->pMD->GetMultiCallableAddrOfCode(), (TADDR)ctorData.pArg3, target);
+            }
+            else
+            {
+                pFixupResult->pHelper = DynamicHelpers::CreateHelperWithTwoArgs(pModule->GetLoaderAllocator(), pFixupResult->pMD->GetMultiCallableAddrOfCode(), target);
+            }
+        }
+        else if (pFixupResult->kind == ENCODE_DICTIONARY_LOOKUP_THISOBJ || pFixupResult->kind == ENCODE_DICTIONARY_LOOKUP_TYPE || pFixupResult->kind == ENCODE_DICTIONARY_LOOKUP_METHOD)
+        {
+            CORINFO_RUNTIME_LOOKUP genericLookup;
+            DWORD dictionaryIndexAndSlot = -1;
+
+            ProcessDynamicDictionaryLookup(pTransitionBlock, pModule, pFixupResult, &genericLookup, &dictionaryIndexAndSlot);
+
+            pFixupResult->pHelper = DynamicHelpers::CreateDictionaryLookupHelper(pModule->GetLoaderAllocator(), &genericLookup, dictionaryIndexAndSlot, pModule);
+        }
+
+        if (pFixupResult->pHelper != NULL)
+        {
+            *(TADDR*)pCell = pFixupResult->pHelper;
+        }
+    }
 }
 
 extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD sectionIndex, Module * pModule, INT frameFlags)
 {
-    PCODE pHelper = NULL;
+    INDIRECTION_CELL_DATA fixupResult;
     SIZE_T result = NULL;
 
     STATIC_CONTRACT_THROWS;
@@ -3369,28 +3533,23 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
 #endif
     _ASSERTE(pCell != NULL);
 
-    TypeHandle th;
-    MethodDesc * pMD = NULL;
-    FieldDesc * pFD = NULL;
-    CORCOMPILE_FIXUP_BLOB_KIND kind = ENCODE_NONE;
-
     {
         GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
 
-        pHelper = DynamicHelperFixup(pTransitionBlock, pCell, sectionIndex, pModule, &kind, &th, &pMD, &pFD);
+        DynamicHelperFixup(pTransitionBlock, pCell, sectionIndex, pModule, &fixupResult);
     }
 
-    if (pHelper == NULL)
+    if (fixupResult.pHelper == NULL)
     {
         TADDR pArgument = GetFirstArgumentRegisterValuePtr(pTransitionBlock);
 
-        switch (kind)
+        switch (fixupResult.kind)
         {
         case ENCODE_ISINSTANCEOF_HELPER:
         case ENCODE_CHKCAST_HELPER:
             {
-                BOOL throwInvalidCast = (kind == ENCODE_CHKCAST_HELPER);
-                if (*(Object **)pArgument == NULL || ObjIsInstanceOf(*(Object **)pArgument, th, throwInvalidCast))
+                BOOL throwInvalidCast = (fixupResult.kind == ENCODE_CHKCAST_HELPER);
+                if (*(Object **)pArgument == NULL || ObjIsInstanceOf(*(Object **)pArgument, fixupResult.th, throwInvalidCast))
                 {
                     result = (SIZE_T)(*(Object **)pArgument);
                 }
@@ -3402,23 +3561,23 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
             }
             break;
         case ENCODE_STATIC_BASE_NONGC_HELPER:
-            result = (SIZE_T)th.AsMethodTable()->GetNonGCStaticsBasePointer();
+            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetNonGCStaticsBasePointer();
             break;
         case ENCODE_STATIC_BASE_GC_HELPER:
-            result = (SIZE_T)th.AsMethodTable()->GetGCStaticsBasePointer();
+            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetGCStaticsBasePointer();
             break;
         case ENCODE_THREAD_STATIC_BASE_NONGC_HELPER:
-            ThreadStatics::GetTLM(th.AsMethodTable())->EnsureClassAllocated(th.AsMethodTable());
-            result = (SIZE_T)th.AsMethodTable()->GetNonGCThreadStaticsBasePointer();
+            ThreadStatics::GetTLM(fixupResult.th.AsMethodTable())->EnsureClassAllocated(fixupResult.th.AsMethodTable());
+            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetNonGCThreadStaticsBasePointer();
             break;
         case ENCODE_THREAD_STATIC_BASE_GC_HELPER:
-            ThreadStatics::GetTLM(th.AsMethodTable())->EnsureClassAllocated(th.AsMethodTable());
-            result = (SIZE_T)th.AsMethodTable()->GetGCThreadStaticsBasePointer();
+            ThreadStatics::GetTLM(fixupResult.th.AsMethodTable())->EnsureClassAllocated(fixupResult.th.AsMethodTable());
+            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetGCThreadStaticsBasePointer();
             break;
         case ENCODE_CCTOR_TRIGGER:
             break;
         case ENCODE_FIELD_ADDRESS:
-            result = (SIZE_T)pFD->GetCurrentStaticAddress();
+            result = (SIZE_T)fixupResult.pFD->GetCurrentStaticAddress();
             break;
         case ENCODE_VIRTUAL_ENTRY:
         // case ENCODE_VIRTUAL_ENTRY_DEF_TOKEN:
@@ -3433,13 +3592,13 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
                     COMPlusThrow(kNullReferenceException);
 
                 // Duplicated logic from JIT_VirtualFunctionPointer_Framed
-                if (!pMD->IsVtableMethod())
+                if (!fixupResult.pMD->IsVtableMethod())
                 {
-                    result = pMD->GetMultiCallableAddrOfCode();
+                    result = fixupResult.pMD->GetMultiCallableAddrOfCode();
                 }
                 else
                 {
-                    result = pMD->GetMultiCallableAddrOfVirtualizedCode(&objRef, th);
+                    result = fixupResult.pMD->GetMultiCallableAddrOfVirtualizedCode(&objRef, fixupResult.th);
                 }
 
                 GCPROTECT_END();
@@ -3455,9 +3614,9 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
 
     pFrame->Pop(CURRENT_THREAD);
 
-    if (pHelper == NULL)
+    if (fixupResult.pHelper == NULL)
         *(SIZE_T *)((TADDR)pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters()) = result;
-    return pHelper;
+    return fixupResult.pHelper;
 }
 
 #endif // FEATURE_READYTORUN

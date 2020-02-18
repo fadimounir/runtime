@@ -36,6 +36,8 @@ namespace ILCompiler.DependencyAnalysis.ReadyToRun
 
         private bool _materializedSignature;
 
+        public ArrayOfEmbeddedDataNode<Import> Imports => _imports;
+
         public ImportSectionNode(string name, CorCompileImportType importType, CorCompileImportFlags flags, byte entrySize, bool emitPrecode, bool emitGCRefMap)
         {
             _name = name;

@@ -3233,6 +3233,60 @@ public:
     }
 
     void SetNativeMetadataAssemblyRefInCache(DWORD rid, PTR_Assembly pAssembly);
+
+    struct IndirectionCellCacheKey
+    {
+        TADDR pIndirectionCell;
+        int sectionIndex;
+    };
+
+    class IndirectionCellCacheTraits
+    {
+    public:
+        static EEHashEntry_t* AllocateEntry(const IndirectionCellCacheKey* pKey, BOOL bDeepCopy, AllocationHeap pHeap = 0)
+        {
+            LIMITED_METHOD_CONTRACT;
+            EEHashEntry_t* pEntry = (EEHashEntry_t*) new (nothrow) BYTE[SIZEOF_EEHASH_ENTRY + sizeof(IndirectionCellCacheKey)];
+            if (!pEntry)
+                return NULL;
+            *((IndirectionCellCacheKey*)pEntry->Key) = *pKey;
+            return pEntry;
+        }
+
+        static void DeleteEntry(EEHashEntry_t* pEntry, AllocationHeap pHeap = 0)
+        {
+            LIMITED_METHOD_CONTRACT;
+            delete[](BYTE*)pEntry;
+        }
+
+        static BOOL CompareKeys(EEHashEntry_t* pEntry, const IndirectionCellCacheKey* e2)
+        {
+            LIMITED_METHOD_CONTRACT;
+            const IndirectionCellCacheKey* e1 = (const IndirectionCellCacheKey*)&pEntry->Key;
+            return (e1->pIndirectionCell == e2->pIndirectionCell) && (e1->sectionIndex == e2->sectionIndex);
+        }
+
+        static DWORD Hash(const IndirectionCellCacheKey* k)
+        {
+            LIMITED_METHOD_CONTRACT;
+            return (DWORD)k->pIndirectionCell + _rotl((DWORD)k->sectionIndex, 5);
+        }
+
+        static const IndirectionCellCacheKey* GetKey(EEHashEntry_t* pEntry)
+        {
+            LIMITED_METHOD_CONTRACT;
+            return (const IndirectionCellCacheKey*)&pEntry->Key;
+        }
+    };
+
+    typedef EEHashTable<const IndirectionCellCacheKey*, IndirectionCellCacheTraits, FALSE> IndirectionCellCache;
+
+    HashDatum GetOrInsertCachedIndirection(const IndirectionCellCacheKey* pKey, const HashDatum pValue);
+
+private:
+    IndirectionCellCache* m_pIndirectionCellCache;
+    CrstStatic m_pIndirectionCellCacheCrst;
+
 #endif // !defined(DACCESS_COMPILE)
 };
 

@@ -109,6 +109,8 @@ LoaderAllocator * DomainFile::GetLoaderAllocator()
 
 #ifndef DACCESS_COMPILE
 
+DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs);
+
 // Optimization intended for EnsureLoadLevel only
 #include <optsmallperfcritical.h>
 void DomainFile::EnsureLoadLevel(FileLoadLevel targetLevel)
@@ -131,6 +133,20 @@ void DomainFile::EnsureLoadLevel(FileLoadLevel targetLevel)
         // we have done so because of reentrancy contraints.)
 
         RequireLoadLevel((FileLoadLevel)(targetLevel-1));
+
+#ifndef CROSSGEN_COMPILE
+        if (targetLevel == FILE_ACTIVE && GetLoadedModule()->IsReadyToRun() && GetLoadedModule()->GetReadyToRunInfo()->GetMultiCoreLoadData() != NULL)
+        {
+            Thread* pThread = SetupUnstartedThread();
+            pThread->SetBackground(TRUE);
+
+            // Passing "this" to the thread in the constructor.
+            if (pThread->CreateNewThread(1 * 1024 * 1024, ParallelIndirectionCellLoader, GetLoadedModule(), L"MultiCoreIndirectionsLoader"))
+            {
+                pThread->StartThread();
+            }
+        }
+#endif
     }
     else
         ThrowIfError(targetLevel);
