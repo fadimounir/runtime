@@ -62,9 +62,6 @@ enum class ReadyToRunSectionType : uint32_t
     ManifestMetadata            = 112, // Added in V2.3
     AttributePresence           = 113, // Added in V3.1
     InliningInfo2               = 114, // Added in V4.1
-    ComponentAssemblies         = 115, // Added in 4.1
-    OwnerCompositeExecutable    = 116, // Added in 4.1
-    MultiCoreLoadData           = 117, // Added in 4.1
 
     // If you add a new section consider whether it is a breaking or non-breaking change.
     // Usually it is non-breaking, but if it is preferable to have older runtimes fail

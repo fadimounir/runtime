@@ -66,7 +66,6 @@ namespace Internal.Runtime
         InliningInfo2 = 114, // Added in 4.1
         ComponentAssemblies = 115, // Added in 4.1
         OwnerCompositeExecutable = 116, // Added in 4.1
-        MultiCoreLoadData = 117, // Added in 4.1
 
         //
         // CoreRT ReadyToRun sections

@@ -581,15 +581,14 @@ namespace ILCompiler.DependencyAnalysis
             InliningInfoTable = new InliningInfoNode(Target, SignatureContext.GlobalContext);
             Header.Add(Internal.Runtime.ReadyToRunSectionType.InliningInfo2, InliningInfoTable, InliningInfoTable);
 
-                // Core library attributes are checked FAR more often than other dlls
-                // attributes, so produce a highly efficient table for determining if they are
-                // present. Other assemblies *MAY* benefit from this feature, but it doesn't show
-                // as useful at this time.
-                if (inputModule == TypeSystemContext.SystemModule)
-                {
-                    AttributePresenceFilterNode attributePresenceTable = new AttributePresenceFilterNode(inputModule);
-                    Header.Add(Internal.Runtime.ReadyToRunSectionType.AttributePresence, attributePresenceTable, attributePresenceTable);
-                }
+            // Core library attributes are checked FAR more often than other dlls
+            // attributes, so produce a highly efficient table for determining if they are
+            // present. Other assemblies *MAY* benefit from this feature, but it doesn't show
+            // as useful at this time.
+            if (inputModule == TypeSystemContext.SystemModule)
+            {
+                AttributePresenceFilterNode attributePresenceTable = new AttributePresenceFilterNode(inputModule);
+                Header.Add(Internal.Runtime.ReadyToRunSectionType.AttributePresence, attributePresenceTable, attributePresenceTable);
             }
 
             EagerImports = new ImportSectionNode(

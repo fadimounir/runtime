@@ -52,7 +52,7 @@ namespace ILCompiler.DependencyAnalysis
 
         public override bool StaticDependenciesAreComputed => true;
 
-        public IEnumerable<TEmbedded> NodesList =>  _nestedNodesList;
+        protected IEnumerable<TEmbedded> NodesList =>  _nestedNodesList;
         private TEmbedded _nextElementToEncode;
         public TEmbedded NextElementToEncode => _nextElementToEncode;
 

@@ -2488,48 +2488,46 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
     Module* pModule = (Module*)lpArgs;
     _ASSERTE(pModule->IsReadyToRun());
 
-    TADDR pMulticoreData = pModule->GetReadyToRunInfo()->GetMultiCoreLoadData();
-    _ASSERTE(pMulticoreData != NULL);
+    printf("STARTED THREAD FOR %s \n", pModule->GetSimpleName());
 
-    BYTE* pBlob = (BYTE*)pMulticoreData;
+    COUNT_T numImportSections;
+    PTR_CORCOMPILE_IMPORT_SECTION pCurrentImportSection = pModule->GetReadyToRunInfo()->GetImportSections(&numImportSections);
 
-    int numMethodFixupEntries = *(int*)pBlob; pBlob += 4;
-    int numDynamicHelperFixupEntries = *(int*)pBlob; pBlob += 4;
-
-    for (int i = 0; i < numMethodFixupEntries; i++)
+    for (int i = 0; i < (int)numImportSections; i++, pCurrentImportSection++)
     {
-        int sectionIndex = *(int*)pBlob; pBlob += 4;
-        int numEntries = *(int*)pBlob; pBlob += 4;
+        CorCompileImportType importType = (CorCompileImportType)pCurrentImportSection->Type;
+        CorCompileImportFlags importFlags = (CorCompileImportFlags)pCurrentImportSection->Flags;
 
-        PTR_CORCOMPILE_IMPORT_SECTION pImportSection = pModule->GetImportSectionFromIndex(sectionIndex);
+        if (importType != CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH)
+            continue;
 
-        for (int j = 0; j < numEntries; j++)
+        if ((importFlags & CORCOMPILE_IMPORT_FLAGS_PCODE) == 0)
+            continue;
+
+        PEImageLayout* pLayout = pModule->GetFile()->GetLoadedIL();
+        int numEntries = pCurrentImportSection->Section.Size / pCurrentImportSection->EntrySize;
+        TADDR* pIndirectionsPtr = (TADDR*)((PBYTE)pLayout->GetBase() + pCurrentImportSection->Section.VirtualAddress);
+
+        for (int j = 0; j < numEntries; j++, pIndirectionsPtr++)
         {
-            TADDR pIndirection = *(TADDR*)pBlob;
-            pBlob += sizeof(TADDR*);
-
+            TADDR pIndirection = *pIndirectionsPtr;
             INDIRECTION_CELL_DATA* pFixupResult = NULL;
+
+            if (pIndirection < (TADDR)pLayout->GetBase() || pIndirection >= (TADDR)((PBYTE)pLayout->GetBase() + pLayout->GetSize()))
+                continue;
 
             Module::IndirectionCellCacheKey key;
             key.pIndirectionCell = pIndirection;
-            key.sectionIndex = sectionIndex;
+            key.sectionIndex = i;
 
             if (pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL)
                 continue;
-
-#ifdef _DEBUG
-            PEImageLayout* pNativeImage = pModule->GetNativeOrReadyToRunImage();
-            RVA rva = pNativeImage->GetDataRva(pIndirection);
-
-            _ASSERTE(pImportSection == pModule->GetImportSectionForRVA(rva));
-            _ASSERTE(j == (rva - pImportSection->Section.VirtualAddress) / sizeof(TADDR));
-#endif
 
             {
                 GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
 
                 pFixupResult = new INDIRECTION_CELL_DATA;
-                ExternalMethodFixupWorker_Inner(pIndirection, sectionIndex, pModule, pImportSection, j, pFixupResult);
+                ExternalMethodFixupWorker_Inner(pIndirection, i, pModule, pCurrentImportSection, j, pFixupResult);
             }
 
             pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
@@ -2537,6 +2535,8 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
             _ASSERTE(pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL);
         }
     }
+
+    printf("COMPLETED FIXUPS FOR %s \n", pModule->GetSimpleName());
 
     GetThread()->EnablePreemptiveGC();
 
@@ -2666,19 +2666,19 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
 
             if (pCachedFixupResult != pFixupResult)
             {
-                printf("FOUND CACHED FIXUP (double load): " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
+                //printf("FOUND CACHED FIXUP (double load): " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
 
                 delete pFixupResult;
                 pFixupResult = pCachedFixupResult;
             }
             else
             {
-                printf("Cache miss ... : " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
+                //printf("Cache miss ... : " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
             }
         }
         else
         {
-            printf("FOUND CACHED FIXUP: " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
+            //printf("FOUND CACHED FIXUP: " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
         }
 
         if (pFixupResult->fVirtual)

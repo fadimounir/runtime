@@ -135,7 +135,7 @@ void DomainFile::EnsureLoadLevel(FileLoadLevel targetLevel)
         RequireLoadLevel((FileLoadLevel)(targetLevel-1));
 
 #ifndef CROSSGEN_COMPILE
-        if (targetLevel == FILE_ACTIVE && GetLoadedModule()->IsReadyToRun() && GetLoadedModule()->GetReadyToRunInfo()->GetMultiCoreLoadData() != NULL)
+        if (targetLevel == FILE_ACTIVE && GetLoadedModule()->IsReadyToRun() /*&& GetLoadedModule()->GetReadyToRunInfo()->GetMultiCoreLoadData() != NULL*/)
         {
             Thread* pThread = SetupUnstartedThread();
             pThread->SetBackground(TRUE);

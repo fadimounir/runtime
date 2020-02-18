@@ -639,17 +639,6 @@ ReadyToRunInfo::ReadyToRunInfo(Module * pModule, PEImageLayout * pLayout, READYT
 
         m_attributesPresence = newFilter;
     }
-
-    // For format version 4.1 and later, there is an optional list of imports to eagerly initialize in parallel
-    m_pMultiCoreLoadData = NULL;
-    if (IsImageVersionAtLeast(4, 1))
-    {
-        IMAGE_DATA_DIRECTORY* pMultiCoreLoadDataDir = FindSection(ReadyToRunSectionType::MultiCoreLoadData);
-        if (pMultiCoreLoadDataDir != NULL)
-        {
-            m_pMultiCoreLoadData = pLayout->GetDirectoryData(pMultiCoreLoadDataDir);
-        }
-    }
 }
 
 static bool SigMatchesMethodDesc(MethodDesc* pMD, SigPointer &sig, Module * pModule)

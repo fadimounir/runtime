@@ -14232,8 +14232,6 @@ HashDatum Module::GetOrInsertCachedIndirection(const IndirectionCellCacheKey* pK
 {
     LIMITED_METHOD_CONTRACT;
 
-    CrstHolder lock(&m_pIndirectionCellCacheCrst);
-
     HashDatum pResult = NULL;
 
     if (m_pIndirectionCellCache->GetValue(pKey, &pResult))
@@ -14241,6 +14239,11 @@ HashDatum Module::GetOrInsertCachedIndirection(const IndirectionCellCacheKey* pK
 
     if(pValue != NULL)
     {
+        CrstHolder lock(&m_pIndirectionCellCacheCrst);
+
+        if (m_pIndirectionCellCache->GetValue(pKey, &pResult))
+            return pResult;
+
         m_pIndirectionCellCache->InsertValue(pKey, pValue);
         return pValue;
     }
