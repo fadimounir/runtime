@@ -2313,7 +2313,7 @@ struct INDIRECTION_CELL_DATA
     PTR_CORCOMPILE_IMPORT_SECTION pImportSection;
 };
 
-void ExternalMethodFixupWorker_Inner(TADDR                          pIndirection,
+void ExternalMethodFixupLoader(TADDR                          pIndirection,
                                      DWORD                          sectionIndex,
                                      Module*                        pModule,
                                      PTR_CORCOMPILE_IMPORT_SECTION  pImportSection,
@@ -2473,76 +2473,6 @@ void ExternalMethodFixupWorker_Inner(TADDR                          pIndirection
     pResult->pInfoModule = pInfoModule;
 }
 
-DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
-{
-    STANDARD_VM_CONTRACT;
-
-    if (GetThread() == NULL)
-        SetupThread();
-
-    MAKE_CURRENT_THREAD_AVAILABLE();
-
-    LoadLevelLimiter loadLevelLimiter;
-    GetThread()->SetLoadLevelLimiter(&loadLevelLimiter);
-
-    Module* pModule = (Module*)lpArgs;
-    _ASSERTE(pModule->IsReadyToRun());
-
-    printf("STARTED THREAD FOR %s \n", pModule->GetSimpleName());
-
-    COUNT_T numImportSections;
-    PTR_CORCOMPILE_IMPORT_SECTION pCurrentImportSection = pModule->GetReadyToRunInfo()->GetImportSections(&numImportSections);
-
-    for (int i = 0; i < (int)numImportSections; i++, pCurrentImportSection++)
-    {
-        CorCompileImportType importType = (CorCompileImportType)pCurrentImportSection->Type;
-        CorCompileImportFlags importFlags = (CorCompileImportFlags)pCurrentImportSection->Flags;
-
-        if (importType != CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH)
-            continue;
-
-        if ((importFlags & CORCOMPILE_IMPORT_FLAGS_PCODE) == 0)
-            continue;
-
-        PEImageLayout* pLayout = pModule->GetFile()->GetLoadedIL();
-        int numEntries = pCurrentImportSection->Section.Size / pCurrentImportSection->EntrySize;
-        TADDR* pIndirectionsPtr = (TADDR*)((PBYTE)pLayout->GetBase() + pCurrentImportSection->Section.VirtualAddress);
-
-        for (int j = 0; j < numEntries; j++, pIndirectionsPtr++)
-        {
-            TADDR pIndirection = *pIndirectionsPtr;
-            INDIRECTION_CELL_DATA* pFixupResult = NULL;
-
-            if (pIndirection < (TADDR)pLayout->GetBase() || pIndirection >= (TADDR)((PBYTE)pLayout->GetBase() + pLayout->GetSize()))
-                continue;
-
-            Module::IndirectionCellCacheKey key;
-            key.pIndirectionCell = pIndirection;
-            key.sectionIndex = i;
-
-            if (pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL)
-                continue;
-
-            {
-                GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
-
-                pFixupResult = new INDIRECTION_CELL_DATA;
-                ExternalMethodFixupWorker_Inner(pIndirection, i, pModule, pCurrentImportSection, j, pFixupResult);
-            }
-
-            pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
-
-            _ASSERTE(pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL);
-        }
-    }
-
-    printf("COMPLETED FIXUPS FOR %s \n", pModule->GetSimpleName());
-
-    GetThread()->EnablePreemptiveGC();
-
-    return 0;
-}
-
 //==========================================================================================
 // In NGen images calls to external methods start out pointing to jump thunks.
 // These jump thunks initially point to the assembly code _ExternalMethodFixupStub
@@ -2659,7 +2589,7 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
         if (pFixupResult == NULL)
         {
             pFixupResult = new INDIRECTION_CELL_DATA;
-            ExternalMethodFixupWorker_Inner(pIndirection, sectionIndex, pModule, pImportSection, index, pFixupResult);
+            ExternalMethodFixupLoader(pIndirection, sectionIndex, pModule, pImportSection, index, pFixupResult);
 
             INDIRECTION_CELL_DATA* pCachedFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
             _ASSERTE(pCachedFixupResult != NULL);
@@ -3153,7 +3083,7 @@ void ProcessDynamicDictionaryLookup(TransitionBlock *           pTransitionBlock
     }
 }
 
-void DynamicHelperFixup_Inner(TADDR* pCell, DWORD sectionIndex, Module* pModule, INDIRECTION_CELL_DATA* pResult)
+void DynamicHelperFixupLoader(TADDR* pCell, DWORD sectionIndex, Module* pModule, INDIRECTION_CELL_DATA* pResult)
 {
     STANDARD_VM_CONTRACT;
 
@@ -3402,11 +3332,37 @@ void DynamicHelperFixup_Inner(TADDR* pCell, DWORD sectionIndex, Module* pModule,
     pResult->pInfoModule = pInfoModule;
 }
 
-void DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD sectionIndex, Module * pModule, INDIRECTION_CELL_DATA* pFixupResult)
+void DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD sectionIndex, Module * pModule, INDIRECTION_CELL_DATA** ppFixupResult)
 {
     STANDARD_VM_CONTRACT;
 
-    DynamicHelperFixup_Inner(pCell, sectionIndex, pModule, pFixupResult);
+    Module::IndirectionCellCacheKey key;
+    key.pIndirectionCell = (TADDR)pCell;
+    key.sectionIndex = sectionIndex;
+
+    INDIRECTION_CELL_DATA* pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, NULL);
+    if (pFixupResult == NULL)
+    {
+        INDIRECTION_CELL_DATA* pNewFixupResult = new INDIRECTION_CELL_DATA;
+        DynamicHelperFixupLoader(pCell, sectionIndex, pModule, pNewFixupResult);
+
+        pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, pNewFixupResult);
+        _ASSERTE(pFixupResult != NULL);
+
+        if (pFixupResult != pNewFixupResult)
+        {
+            //printf("FOUND CACHED HELPER (double load): " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pCell), sectionIndex, pModule->GetSimpleName());
+            delete pNewFixupResult;
+        }
+        else
+        {
+            //printf("Cache helper miss ... : " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pCell), sectionIndex, pModule->GetSimpleName());
+        }
+    }
+    else
+    {
+        //printf("FOUND CACHED HELPER: " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pCell), sectionIndex, pModule->GetSimpleName());
+    }
 
     if (pFixupResult->pHelper != NULL)
     {
@@ -3493,12 +3449,14 @@ void DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD
             *(TADDR*)pCell = pFixupResult->pHelper;
         }
     }
+
+    *ppFixupResult = pFixupResult;
 }
 
 extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD sectionIndex, Module * pModule, INT frameFlags)
 {
-    INDIRECTION_CELL_DATA fixupResult;
     SIZE_T result = NULL;
+    INDIRECTION_CELL_DATA* pFixupResult = NULL;
 
     STATIC_CONTRACT_THROWS;
     STATIC_CONTRACT_GC_TRIGGERS;
@@ -3536,20 +3494,22 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
     {
         GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
 
-        DynamicHelperFixup(pTransitionBlock, pCell, sectionIndex, pModule, &fixupResult);
+        DynamicHelperFixup(pTransitionBlock, pCell, sectionIndex, pModule, &pFixupResult);
+        _ASSERTE(pFixupResult != NULL);
     }
 
-    if (fixupResult.pHelper == NULL)
+
+    if (pFixupResult->pHelper == NULL)
     {
         TADDR pArgument = GetFirstArgumentRegisterValuePtr(pTransitionBlock);
 
-        switch (fixupResult.kind)
+        switch (pFixupResult->kind)
         {
         case ENCODE_ISINSTANCEOF_HELPER:
         case ENCODE_CHKCAST_HELPER:
             {
-                BOOL throwInvalidCast = (fixupResult.kind == ENCODE_CHKCAST_HELPER);
-                if (*(Object **)pArgument == NULL || ObjIsInstanceOf(*(Object **)pArgument, fixupResult.th, throwInvalidCast))
+                BOOL throwInvalidCast = (pFixupResult->kind == ENCODE_CHKCAST_HELPER);
+                if (*(Object **)pArgument == NULL || ObjIsInstanceOf(*(Object **)pArgument, pFixupResult->th, throwInvalidCast))
                 {
                     result = (SIZE_T)(*(Object **)pArgument);
                 }
@@ -3561,23 +3521,23 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
             }
             break;
         case ENCODE_STATIC_BASE_NONGC_HELPER:
-            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetNonGCStaticsBasePointer();
+            result = (SIZE_T)pFixupResult->th.AsMethodTable()->GetNonGCStaticsBasePointer();
             break;
         case ENCODE_STATIC_BASE_GC_HELPER:
-            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetGCStaticsBasePointer();
+            result = (SIZE_T)pFixupResult->th.AsMethodTable()->GetGCStaticsBasePointer();
             break;
         case ENCODE_THREAD_STATIC_BASE_NONGC_HELPER:
-            ThreadStatics::GetTLM(fixupResult.th.AsMethodTable())->EnsureClassAllocated(fixupResult.th.AsMethodTable());
-            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetNonGCThreadStaticsBasePointer();
+            ThreadStatics::GetTLM(pFixupResult->th.AsMethodTable())->EnsureClassAllocated(pFixupResult->th.AsMethodTable());
+            result = (SIZE_T)pFixupResult->th.AsMethodTable()->GetNonGCThreadStaticsBasePointer();
             break;
         case ENCODE_THREAD_STATIC_BASE_GC_HELPER:
-            ThreadStatics::GetTLM(fixupResult.th.AsMethodTable())->EnsureClassAllocated(fixupResult.th.AsMethodTable());
-            result = (SIZE_T)fixupResult.th.AsMethodTable()->GetGCThreadStaticsBasePointer();
+            ThreadStatics::GetTLM(pFixupResult->th.AsMethodTable())->EnsureClassAllocated(pFixupResult->th.AsMethodTable());
+            result = (SIZE_T)pFixupResult->th.AsMethodTable()->GetGCThreadStaticsBasePointer();
             break;
         case ENCODE_CCTOR_TRIGGER:
             break;
         case ENCODE_FIELD_ADDRESS:
-            result = (SIZE_T)fixupResult.pFD->GetCurrentStaticAddress();
+            result = (SIZE_T)pFixupResult->pFD->GetCurrentStaticAddress();
             break;
         case ENCODE_VIRTUAL_ENTRY:
         // case ENCODE_VIRTUAL_ENTRY_DEF_TOKEN:
@@ -3592,13 +3552,13 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
                     COMPlusThrow(kNullReferenceException);
 
                 // Duplicated logic from JIT_VirtualFunctionPointer_Framed
-                if (!fixupResult.pMD->IsVtableMethod())
+                if (!pFixupResult->pMD->IsVtableMethod())
                 {
-                    result = fixupResult.pMD->GetMultiCallableAddrOfCode();
+                    result = pFixupResult->pMD->GetMultiCallableAddrOfCode();
                 }
                 else
                 {
-                    result = fixupResult.pMD->GetMultiCallableAddrOfVirtualizedCode(&objRef, fixupResult.th);
+                    result = pFixupResult->pMD->GetMultiCallableAddrOfVirtualizedCode(&objRef, pFixupResult->th);
                 }
 
                 GCPROTECT_END();
@@ -3614,9 +3574,88 @@ extern "C" SIZE_T STDCALL DynamicHelperWorker(TransitionBlock * pTransitionBlock
 
     pFrame->Pop(CURRENT_THREAD);
 
-    if (fixupResult.pHelper == NULL)
+    if (pFixupResult->pHelper == NULL)
         *(SIZE_T *)((TADDR)pTransitionBlock + TransitionBlock::GetOffsetOfArgumentRegisters()) = result;
-    return fixupResult.pHelper;
+    return pFixupResult->pHelper;
+}
+
+DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
+{
+    STANDARD_VM_CONTRACT;
+
+    if (GetThread() == NULL)
+        SetupThread();
+
+    MAKE_CURRENT_THREAD_AVAILABLE();
+
+    LoadLevelLimiter loadLevelLimiter;
+    GetThread()->SetLoadLevelLimiter(&loadLevelLimiter);
+
+    Module* pModule = (Module*)lpArgs;
+    _ASSERTE(pModule->IsReadyToRun());
+
+    printf("STARTED THREAD FOR %s \n", pModule->GetSimpleName());
+
+    COUNT_T numImportSections;
+    PTR_CORCOMPILE_IMPORT_SECTION pCurrentImportSection = pModule->GetReadyToRunInfo()->GetImportSections(&numImportSections);
+
+    for (int i = 0; i < 4 /*TODO: how to ignore things like the PrecodeImports section? */; i++, pCurrentImportSection++)
+    {
+        CorCompileImportType importType = (CorCompileImportType)pCurrentImportSection->Type;
+        CorCompileImportFlags importFlags = (CorCompileImportFlags)pCurrentImportSection->Flags;
+
+        if ((importFlags & CORCOMPILE_IMPORT_FLAGS_PCODE) == 0)
+            continue;
+
+        if (importType != CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH && importType != CORCOMPILE_IMPORT_TYPE_UNKNOWN)
+            continue;
+
+        PEImageLayout* pLayout = pModule->GetFile()->GetLoadedIL();
+        int numEntries = pCurrentImportSection->Section.Size / pCurrentImportSection->EntrySize;
+        TADDR* pIndirectionsPtr = (TADDR*)((PBYTE)pLayout->GetBase() + pCurrentImportSection->Section.VirtualAddress);
+
+        for (int j = 0; j < numEntries; j++, pIndirectionsPtr++)
+        {
+            TADDR pIndirection = importType == CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH ? *pIndirectionsPtr : (TADDR)pIndirectionsPtr;
+
+            INDIRECTION_CELL_DATA* pFixupResult = NULL;
+
+            if (pIndirection < (TADDR)pLayout->GetBase() || pIndirection >= (TADDR)((PBYTE)pLayout->GetBase() + pLayout->GetSize()))
+                continue;
+
+            Module::IndirectionCellCacheKey key;
+            key.pIndirectionCell = pIndirection;
+            key.sectionIndex = i;
+
+            if (pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL)
+                continue;
+
+            pFixupResult = new INDIRECTION_CELL_DATA;
+
+            {
+                GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
+
+                if (importType == CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH)
+                {
+                    ExternalMethodFixupLoader(pIndirection, i, pModule, pCurrentImportSection, j, pFixupResult);
+                }
+                else
+                {
+                    _ASSERT(importType == CORCOMPILE_IMPORT_TYPE_UNKNOWN);
+                    DynamicHelperFixupLoader((TADDR*)pIndirection, i, pModule, pFixupResult);
+                }
+            }
+
+            pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
+            _ASSERTE(pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL);
+        }
+    }
+
+    printf("COMPLETED FIXUPS FOR %s \n", pModule->GetSimpleName());
+
+    GetThread()->EnablePreemptiveGC();
+
+    return 0;
 }
 
 #endif // FEATURE_READYTORUN
