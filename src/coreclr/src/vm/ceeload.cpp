@@ -14228,23 +14228,23 @@ bool Module::HasReferenceByName(LPCUTF8 pModuleName)
     return false;
 }
 
-HashDatum Module::GetOrInsertCachedIndirection(const IndirectionCellCacheKey* pKey, const HashDatum pValue)
+HashDatum Module::GetOrInsertCachedIndirection(const IndirectionCellCacheKey key, const HashDatum pValue)
 {
     LIMITED_METHOD_CONTRACT;
 
     HashDatum pResult = NULL;
 
-    if (m_pIndirectionCellCache->GetValue(pKey, &pResult))
+    if (m_pIndirectionCellCache->GetValue(key, &pResult))
         return pResult;
 
     if(pValue != NULL)
     {
         CrstHolder lock(&m_pIndirectionCellCacheCrst);
 
-        if (m_pIndirectionCellCache->GetValue(pKey, &pResult))
+        if (m_pIndirectionCellCache->GetValue(key, &pResult))
             return pResult;
 
-        m_pIndirectionCellCache->InsertValue(pKey, pValue);
+        m_pIndirectionCellCache->InsertValue(key, pValue);
         return pValue;
     }
 

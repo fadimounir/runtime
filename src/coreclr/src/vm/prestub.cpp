@@ -2584,14 +2584,14 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
         key.pIndirectionCell = pIndirection;
         key.sectionIndex = sectionIndex;
 
-        INDIRECTION_CELL_DATA* pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, NULL);
+        INDIRECTION_CELL_DATA* pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(key, NULL);
 
         if (pFixupResult == NULL)
         {
             pFixupResult = new INDIRECTION_CELL_DATA;
             ExternalMethodFixupLoader(pIndirection, sectionIndex, pModule, pImportSection, index, pFixupResult);
 
-            INDIRECTION_CELL_DATA* pCachedFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
+            INDIRECTION_CELL_DATA* pCachedFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(key, pFixupResult);
             _ASSERTE(pCachedFixupResult != NULL);
 
             if (pCachedFixupResult != pFixupResult)
@@ -3340,7 +3340,7 @@ void DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD
     key.pIndirectionCell = (TADDR)pCell;
     key.sectionIndex = sectionIndex;
 
-    INDIRECTION_CELL_DATA* pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, NULL);
+    /*INDIRECTION_CELL_DATA* pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(&key, NULL);
     if (pFixupResult == NULL)
     {
         INDIRECTION_CELL_DATA* pNewFixupResult = new INDIRECTION_CELL_DATA;
@@ -3362,7 +3362,11 @@ void DynamicHelperFixup(TransitionBlock * pTransitionBlock, TADDR * pCell, DWORD
     else
     {
         //printf("FOUND CACHED HELPER: " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pCell), sectionIndex, pModule->GetSimpleName());
-    }
+    }*/
+
+    INDIRECTION_CELL_DATA* pFixupResult = new INDIRECTION_CELL_DATA;
+    DynamicHelperFixupLoader(pCell, sectionIndex, pModule, pFixupResult);
+
 
     if (pFixupResult->pHelper != NULL)
     {
@@ -3607,7 +3611,7 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
         if ((importFlags & CORCOMPILE_IMPORT_FLAGS_PCODE) == 0)
             continue;
 
-        if (importType != CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH && importType != CORCOMPILE_IMPORT_TYPE_UNKNOWN)
+        if (importType != CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH /*&& importType != CORCOMPILE_IMPORT_TYPE_UNKNOWN*/)
             continue;
 
         PEImageLayout* pLayout = pModule->GetFile()->GetLoadedIL();
@@ -3616,7 +3620,7 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
 
         for (int j = 0; j < numEntries; j++, pIndirectionsPtr++)
         {
-            TADDR pIndirection = importType == CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH ? *pIndirectionsPtr : (TADDR)pIndirectionsPtr;
+            TADDR pIndirection = (TADDR)pIndirectionsPtr;
 
             INDIRECTION_CELL_DATA* pFixupResult = NULL;
 
@@ -3627,7 +3631,7 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
             key.pIndirectionCell = pIndirection;
             key.sectionIndex = i;
 
-            if (pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL)
+            if (pModule->GetOrInsertCachedIndirection(key, NULL) != NULL)
                 continue;
 
             pFixupResult = new INDIRECTION_CELL_DATA;
@@ -3637,17 +3641,35 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
 
                 if (importType == CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH)
                 {
-                    ExternalMethodFixupLoader(pIndirection, i, pModule, pCurrentImportSection, j, pFixupResult);
+                    EX_TRY
+                    {
+                        ExternalMethodFixupLoader(pIndirection, i, pModule, pCurrentImportSection, j, pFixupResult);
+
+                        pModule->GetOrInsertCachedIndirection(key, pFixupResult);
+                        _ASSERTE(pModule->GetOrInsertCachedIndirection(key, NULL) != NULL);
+
+                        /*if (pFixupResult->pMD != NULL && pFixupResult->pMD->GetModule()->IsReadyToRun())
+                        {
+                            pFixupResult->pMD->EnsureActive();
+
+                            if (pFixupResult->pMD->HasILHeader())
+                            {
+                                PrepareCodeConfig config(NativeCodeVersion(pFixupResult->pMD), TRUE, TRUE);
+                                pFixupResult->pMD->PrepareCode(&config);
+                            }
+                        }*/
+                    }
+                    EX_CATCH
+                    {
+                    }
+                    EX_END_CATCH(SwallowAllExceptions);
                 }
-                else
+                /*else
                 {
                     _ASSERT(importType == CORCOMPILE_IMPORT_TYPE_UNKNOWN);
                     DynamicHelperFixupLoader((TADDR*)pIndirection, i, pModule, pFixupResult);
-                }
+                }*/
             }
-
-            pModule->GetOrInsertCachedIndirection(&key, pFixupResult);
-            _ASSERTE(pModule->GetOrInsertCachedIndirection(&key, NULL) != NULL);
         }
     }
 
