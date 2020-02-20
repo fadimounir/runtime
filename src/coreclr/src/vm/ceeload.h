@@ -3283,6 +3283,8 @@ public:
 
     HashDatum GetOrInsertCachedIndirection(const IndirectionCellCacheKey pKey, const HashDatum pValue);
 
+    Volatile<DWORD> m_dwMultiLoaderThreadStarted;
+
 private:
     IndirectionCellCache* m_pIndirectionCellCache;
     CrstStatic m_pIndirectionCellCacheCrst;

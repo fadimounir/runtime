@@ -135,15 +135,17 @@ void DomainFile::EnsureLoadLevel(FileLoadLevel targetLevel)
         RequireLoadLevel((FileLoadLevel)(targetLevel-1));
 
 #ifndef CROSSGEN_COMPILE
-        if (targetLevel == FILE_ACTIVE && GetLoadedModule()->IsReadyToRun() /*&& GetLoadedModule()->GetReadyToRunInfo()->GetMultiCoreLoadData() != NULL*/)
+        if (targetLevel == FILE_ACTIVE && GetLoadedModule()->IsReadyToRun())
         {
-            Thread* pThread = SetupUnstartedThread();
-            pThread->SetBackground(TRUE);
-
-            // Passing "this" to the thread in the constructor.
-            if (pThread->CreateNewThread(1 * 1024 * 1024, ParallelIndirectionCellLoader, GetLoadedModule(), L"MultiCoreIndirectionsLoader"))
+            if (FastInterlockCompareExchange(&GetLoadedModule()->m_dwMultiLoaderThreadStarted, 1, 0) == 0)
             {
-                pThread->StartThread();
+                Thread* pThread = SetupUnstartedThread();
+                pThread->SetBackground(TRUE);
+
+                if (pThread->CreateNewThread(1 * 1024 * 1024, ParallelIndirectionCellLoader, GetLoadedModule(), L"MultiCoreIndirectionsLoader"))
+                {
+                    pThread->StartThread();
+                }
             }
         }
 #endif

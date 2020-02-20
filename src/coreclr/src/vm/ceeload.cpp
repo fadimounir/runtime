@@ -398,6 +398,7 @@ Module::Module(Assembly *pAssembly, mdFile moduleRef, PEFile *file)
     m_moduleRef = moduleRef;
     m_file      = file;
     m_dwTransientFlags = CLASSES_FREED;
+    m_dwMultiLoaderThreadStarted = 0;
 
     if (!m_file->HasNativeImage())
     {

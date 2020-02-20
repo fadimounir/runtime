@@ -2314,11 +2314,11 @@ struct INDIRECTION_CELL_DATA
 };
 
 void ExternalMethodFixupLoader(TADDR                          pIndirection,
-                                     DWORD                          sectionIndex,
-                                     Module*                        pModule,
-                                     PTR_CORCOMPILE_IMPORT_SECTION  pImportSection,
-                                     int                            index,
-                                     INDIRECTION_CELL_DATA*         pResult)
+                               DWORD                          sectionIndex,
+                               Module*                        pModule,
+                               PTR_CORCOMPILE_IMPORT_SECTION  pImportSection,
+                               int                            index,
+                               INDIRECTION_CELL_DATA*         pResult)
 {
     STANDARD_VM_CONTRACT;
 
@@ -2585,30 +2585,16 @@ EXTERN_C PCODE STDCALL ExternalMethodFixupWorker(TransitionBlock * pTransitionBl
         key.sectionIndex = sectionIndex;
 
         INDIRECTION_CELL_DATA* pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(key, NULL);
-
         if (pFixupResult == NULL)
         {
-            pFixupResult = new INDIRECTION_CELL_DATA;
-            ExternalMethodFixupLoader(pIndirection, sectionIndex, pModule, pImportSection, index, pFixupResult);
+            NewHolder<INDIRECTION_CELL_DATA> pNewFixupResult = new INDIRECTION_CELL_DATA;
+            ExternalMethodFixupLoader(pIndirection, sectionIndex, pModule, pImportSection, index, pNewFixupResult.GetValue());
 
-            INDIRECTION_CELL_DATA* pCachedFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(key, pFixupResult);
-            _ASSERTE(pCachedFixupResult != NULL);
+            pFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(key, pNewFixupResult.GetValue());
+            _ASSERTE(pFixupResult != NULL);
 
-            if (pCachedFixupResult != pFixupResult)
-            {
-                //printf("FOUND CACHED FIXUP (double load): " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
-
-                delete pFixupResult;
-                pFixupResult = pCachedFixupResult;
-            }
-            else
-            {
-                //printf("Cache miss ... : " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
-            }
-        }
-        else
-        {
-            //printf("FOUND CACHED FIXUP: " FMT_ADDR " for section %d in module %s \n", DBG_ADDR(pIndirection), sectionIndex, pModule->GetSimpleName());
+            if (pFixupResult == pNewFixupResult.GetValue())
+                pNewFixupResult.SuppressRelease();
         }
 
         if (pFixupResult->fVirtual)
@@ -3598,20 +3584,27 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
     Module* pModule = (Module*)lpArgs;
     _ASSERTE(pModule->IsReadyToRun());
 
-    printf("STARTED THREAD FOR %s \n", pModule->GetSimpleName());
+    //WCHAR debugStr[1024];
+    //printf("STARTED THREAD FOR " FMT_ADDR " %s \n\0", DBG_ADDR(pModule), pModule->GetSimpleName());
+    //wsprintf(debugStr, L"STARTED THREAD FOR " FMT_ADDR " %S \n\0", DBG_ADDR(pModule), pModule->GetSimpleName());
+    //WszOutputDebugString(debugStr);
+
+    while (SystemDomain::System()->DefaultDomain()->GetTPABinderContext() == NULL)
+    {
+        // Wait for TPA binder context to load. This could happen at early stages of process startup, while loading
+        // the corelib assembly.
+        Sleep(10);
+    }
 
     COUNT_T numImportSections;
     PTR_CORCOMPILE_IMPORT_SECTION pCurrentImportSection = pModule->GetReadyToRunInfo()->GetImportSections(&numImportSections);
 
-    for (int i = 0; i < 4 /*TODO: how to ignore things like the PrecodeImports section? */; i++, pCurrentImportSection++)
+    for (COUNT_T i = 0; i < numImportSections; i++, pCurrentImportSection++)
     {
         CorCompileImportType importType = (CorCompileImportType)pCurrentImportSection->Type;
         CorCompileImportFlags importFlags = (CorCompileImportFlags)pCurrentImportSection->Flags;
 
-        if ((importFlags & CORCOMPILE_IMPORT_FLAGS_PCODE) == 0)
-            continue;
-
-        if (importType != CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH /*&& importType != CORCOMPILE_IMPORT_TYPE_UNKNOWN*/)
+        if (importType != CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH || (importFlags & CORCOMPILE_IMPORT_FLAGS_PCODE) == 0)
             continue;
 
         PEImageLayout* pLayout = pModule->GetFile()->GetLoadedIL();
@@ -3622,10 +3615,11 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
         {
             TADDR pIndirection = (TADDR)pIndirectionsPtr;
 
-            INDIRECTION_CELL_DATA* pFixupResult = NULL;
-
             if (pIndirection < (TADDR)pLayout->GetBase() || pIndirection >= (TADDR)((PBYTE)pLayout->GetBase() + pLayout->GetSize()))
+            {
+                // Indirection cell already fixed up by another thread.
                 continue;
+            }
 
             Module::IndirectionCellCacheKey key;
             key.pIndirectionCell = pIndirection;
@@ -3634,46 +3628,33 @@ DWORD __stdcall ParallelIndirectionCellLoader(LPVOID lpArgs)
             if (pModule->GetOrInsertCachedIndirection(key, NULL) != NULL)
                 continue;
 
-            pFixupResult = new INDIRECTION_CELL_DATA;
-
             {
                 GCX_PREEMP_THREAD_EXISTS(CURRENT_THREAD);
 
-                if (importType == CORCOMPILE_IMPORT_TYPE_STUB_DISPATCH)
+                EX_TRY
                 {
-                    EX_TRY
-                    {
-                        ExternalMethodFixupLoader(pIndirection, i, pModule, pCurrentImportSection, j, pFixupResult);
+                    NewHolder<INDIRECTION_CELL_DATA> pNewFixupResult = new INDIRECTION_CELL_DATA;
+                    ExternalMethodFixupLoader(pIndirection, i, pModule, pCurrentImportSection, j, pNewFixupResult.GetValue());
 
-                        pModule->GetOrInsertCachedIndirection(key, pFixupResult);
-                        _ASSERTE(pModule->GetOrInsertCachedIndirection(key, NULL) != NULL);
+                    INDIRECTION_CELL_DATA* pCachedFixupResult = (INDIRECTION_CELL_DATA*)pModule->GetOrInsertCachedIndirection(key, pNewFixupResult.GetValue());
+                    _ASSERTE(pCachedFixupResult != NULL);
 
-                        /*if (pFixupResult->pMD != NULL && pFixupResult->pMD->GetModule()->IsReadyToRun())
-                        {
-                            pFixupResult->pMD->EnsureActive();
+                    if (pCachedFixupResult == pNewFixupResult.GetValue())
+                        pNewFixupResult.SuppressRelease();
 
-                            if (pFixupResult->pMD->HasILHeader())
-                            {
-                                PrepareCodeConfig config(NativeCodeVersion(pFixupResult->pMD), TRUE, TRUE);
-                                pFixupResult->pMD->PrepareCode(&config);
-                            }
-                        }*/
-                    }
-                    EX_CATCH
-                    {
-                    }
-                    EX_END_CATCH(SwallowAllExceptions);
+                    // TODO: consider pre-jitting code for methods with no R2R code, especially the cross-module instantiations
                 }
-                /*else
+                EX_CATCH
                 {
-                    _ASSERT(importType == CORCOMPILE_IMPORT_TYPE_UNKNOWN);
-                    DynamicHelperFixupLoader((TADDR*)pIndirection, i, pModule, pFixupResult);
-                }*/
+                }
+                EX_END_CATCH(SwallowAllExceptions);
             }
         }
     }
 
-    printf("COMPLETED FIXUPS FOR %s \n", pModule->GetSimpleName());
+    //printf("COMPLETED FIXUPS FOR " FMT_ADDR " %s \n\0", DBG_ADDR(pModule), pModule->GetSimpleName());
+    //wsprintf(debugStr, L"COMPLETED FIXUPS FOR " FMT_ADDR " %S \n\0", DBG_ADDR(pModule), pModule->GetSimpleName());
+    //WszOutputDebugString(debugStr);
 
     GetThread()->EnablePreemptiveGC();
 
